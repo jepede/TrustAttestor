@@ -34,11 +34,55 @@ final class StructuralProbeEvidence {
         final String name;
         final Disposition disposition;
         final String detail;
+        final boolean nativeAttributes;
+        final boolean userDataPresent;
+        final boolean classPresent;
+        final String descriptor;
+        final int debugPid;
+        final boolean debugPidKnown;
+        final boolean debugPidMatches;
 
         BinderLeg(String name, Disposition disposition, String detail) {
+            this(name, disposition, detail, false, false, false, "", -1, false, false);
+        }
+
+        BinderLeg(String name, Disposition disposition, String detail,
+                  boolean nativeAttributes, boolean userDataPresent, boolean classPresent,
+                  String descriptor, int debugPid, boolean debugPidKnown,
+                  boolean debugPidMatches) {
             this.name = name == null ? "unknown" : name;
             this.disposition = disposition == null ? Disposition.UNAVAILABLE : disposition;
             this.detail = detail == null ? "" : detail;
+            this.nativeAttributes = nativeAttributes;
+            this.userDataPresent = userDataPresent;
+            this.classPresent = classPresent;
+            this.descriptor = descriptor == null ? "" : descriptor;
+            this.debugPid = debugPid;
+            this.debugPidKnown = debugPidKnown;
+            this.debugPidMatches = debugPidMatches;
+        }
+
+        boolean structuralMatch() {
+            return disposition == Disposition.LOCAL
+                    && nativeAttributes
+                    && userDataPresent
+                    && classPresent
+                    && expectedDescriptor(name, descriptor);
+        }
+
+        boolean strongMatch() {
+            return structuralMatch() && debugPidKnown && debugPidMatches;
+        }
+
+        private static boolean expectedDescriptor(String name, String descriptor) {
+            if (descriptor == null || descriptor.isEmpty()) return false;
+            if ("IKeystoreOperation".equals(name)) {
+                return "android.system.keystore2.IKeystoreOperation".equals(descriptor);
+            }
+            if ("IKeystoreService".equals(name)) {
+                return "android.system.keystore2.IKeystoreService".equals(descriptor);
+            }
+            return "android.system.keystore2.IKeystoreSecurityLevel".equals(descriptor);
         }
     }
 
@@ -97,10 +141,9 @@ final class StructuralProbeEvidence {
     }
 
     /**
-     * A local Binder in any successfully obtained Keystore reply is sufficient evidence. A clean
-     * result, however, requires a remote Binder from a core path: either getKeyEntry's returned
-     * IKeystoreSecurityLevel or a live IKeystoreOperation. The optional getSecurityLevel path alone
-     * cannot verify the probe because it does not exercise the reply objects under test.
+     * Detects the current OMK carrier shape independently of the protocol probes. A local Binder
+     * by itself is insufficient: the current injector must also expose NDK user data, an expected
+     * AIDL descriptor and (when available) the current-process debug PID.
      */
     static Decision binderLocality(List<BinderLeg> legs) {
         List<BinderLeg> safe = legs == null ? Collections.emptyList() : legs;
@@ -108,11 +151,21 @@ final class StructuralProbeEvidence {
         int remote = 0;
         int coreRemote = 0;
         int unavailable = 0;
+        int structural = 0;
+        int strong = 0;
+        int suspiciousLocal = 0;
         StringBuilder detail = new StringBuilder();
         for (BinderLeg leg : safe) {
             if (leg == null) continue;
             switch (leg.disposition) {
-                case LOCAL -> local++;
+                case LOCAL -> {
+                    local++;
+                    if (isCandidateBinderLeg(leg.name)) {
+                        if (leg.structuralMatch()) structural++;
+                        if (leg.strongMatch()) strong++;
+                        else suspiciousLocal++;
+                    }
+                }
                 case REMOTE -> {
                     remote++;
                     if (isCoreBinderLeg(leg.name)) coreRemote++;
@@ -122,11 +175,18 @@ final class StructuralProbeEvidence {
             append(detail, leg.name + "=" + leg.disposition +
                     (leg.detail.isEmpty() ? "" : "(" + leg.detail + ")"));
         }
-        if (local > 0) {
+        if (structural > 0) {
             return new Decision(SilentProbeEvidence.Status.DETECTED,
-                    "Keystore 回复中出现当前进程的本地 Binder 对象",
-                    "local=" + local + "; coreRemote=" + coreRemote + "; remote=" + remote +
-                            "; unavailable=" + unavailable + "; " + detail);
+                    "Keystore 返回了带 NDK 用户数据的 OMK synthetic Binder",
+                    "structural=" + structural + "; strong=" + strong + "; local=" + local
+                            + "; coreRemote=" + coreRemote + "; remote=" + remote
+                            + "; unavailable=" + unavailable + "; " + detail);
+        }
+        if (suspiciousLocal > 0) {
+            return new Decision(SilentProbeEvidence.Status.WARNING,
+                    "Keystore 回复中出现未完成分类的本地 Binder",
+                    "local=" + local + "; structural=0; strong=0; coreRemote=" + coreRemote
+                            + "; remote=" + remote + "; unavailable=" + unavailable + "; " + detail);
         }
         if (coreRemote > 0) {
             return new Decision(SilentProbeEvidence.Status.VERIFIED,
@@ -141,7 +201,12 @@ final class StructuralProbeEvidence {
     }
 
     private static boolean isCoreBinderLeg(String name) {
-        return "getKeyEntry.iSecurityLevel".equals(name) || "IKeystoreOperation".equals(name);
+        return (name != null && name.startsWith("getKeyEntry"))
+                || "IKeystoreOperation".equals(name);
+    }
+
+    private static boolean isCandidateBinderLeg(String name) {
+        return "getSecurityLevel".equals(name) || isCoreBinderLeg(name);
     }
 
     private static void append(StringBuilder builder, String value) {

@@ -18,7 +18,6 @@
 #include <ranges>
 #include <string_view>
 #include <sys/auxv.h>
-#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -81,15 +80,6 @@ uint32_t sKernelSuVersion = 0;
 uint32_t sKernelSuFlags = 0;
 uint32_t sKernelSuUapiVersion = 0;
 int32_t sKernelSuMagicErrno = 0;
-bool sThroneHuntAvailable = false;
-bool sThroneHuntDetected = false;
-uint32_t sThroneHuntBaselineOpen = 0;
-uint32_t sThroneHuntBaselineAccess = 0;
-uint32_t sThroneHuntFinalOpen = 0;
-uint32_t sThroneHuntFinalAccess = 0;
-uint32_t sThroneHuntFinalRaw = 0;
-uint32_t sThroneHuntFinalInvalid = 0;
-std::string sThroneHuntDetail;
 uint8_t sTeeSimulator = 0;
 uint32_t sReadProc = 0;
 uint8_t sAbnormalKey = 0;

@@ -13,12 +13,14 @@
 命令行构建（Windows）：
 
 ```powershell
-.\gradlew.bat :app:assembleDebug :app:assembleRelease
+.\build-external.ps1 -Variant debug
+# 需要 Release 预览时：
+.\build-external.ps1 -Variant release
 ```
 
 macOS/Linux 使用 `chmod +x gradlew`、`./gradlew`。依赖已缓存时可增加 `--offline`。工程使用 Gradle 8.10.2、AGP 8.7.2、Kotlin 2.0.21，与提取时的主项目版本一致。
 
-输出为 `app/build/outputs/apk/debug/app-debug.apk` 和 `app/build/outputs/apk/release/app-release.apk`。两种构建都使用本机开发签名；`release` 设置 `BuildConfig.DEBUG=false`，用于检查正式版的证据折叠/文案规则，不使用 TA 的生产签名或混淆流程。
+输出位于外部构建根的 `app/outputs/apk/debug/` 和 `app/outputs/apk/release/`。Gradle 用户目录、项目缓存、Kotlin 状态、临时文件和所有中间产物也会写入外部构建根；不会在本目录生成 `build/`、`.gradle/` 或 `.kotlin/`。两种构建都使用本机开发签名；`release` 设置 `BuildConfig.DEBUG=false`，用于检查正式版的证据折叠/文案规则，不使用 TA 的生产签名或混淆流程。
 
 ## 预览方式
 
@@ -70,7 +72,7 @@ python tools/sync_ui.py --target "<path-to-TrustAttestor>/android" --direction p
 python tools/sync_ui.py --target "<path-to-TrustAttestor>/android" --direction pull --apply
 ```
 
-工具根据 `ui-sync-manifest.json` 的共同基线比较两边内容，仅复制发生变化的白名单文件。若双方对同一文件做了不同修改，会拒绝整批写入并显示差异，需先人工合并；仅接收端修改的文件会保留。每次写入前，接收工程的 `build/ui-sync-backups/` 会保存旧文件、旧基线和恢复记录。写入失败会尝试回滚。
+工具根据 `ui-sync-manifest.json` 的共同基线比较两边内容，仅复制发生变化的白名单文件。若双方对同一文件做了不同修改，会拒绝整批写入并显示差异，需先人工合并；仅接收端修改的文件会保留。同步本项目时，旧文件、旧基线和恢复记录写入仓库外的 `TrustAttestor-build/ui/ui-sync-backups/`；临时测试工程仍使用自身的 `build/ui-sync-backups/`。写入失败会尝试回滚。
 
 允许回同步：`MainActivity.kt`、`AppLanguage.kt`、`CloudDisclosure.kt`、`FindingTextCatalog.kt`、`ui/**/*.kt` 及 `app/src/main/res/`。在这些目录新建组件/资源也能同步。**删除、重命名需手工处理两边对应文件和基线条目**；工具不会自动删除或恢复缺失文件。
 

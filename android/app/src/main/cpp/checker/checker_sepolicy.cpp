@@ -836,30 +836,40 @@ static uint32_t Check(JNIEnv *env) {
     bool allowed = false;
     bool channel_mismatch = false;
     uint32_t sequence = 0;
+    // These access-vector queries are useful policy fingerprints, but their exact allow rules
+    // vary across OEM policies. A clean app_zygote may lack one of them even though its SELinux
+    // status/context channels are fully readable. Do not abort the whole probe or report it as
+    // unavailable when an optional authorization oracle is absent; keep any positive anomaly
+    // signal and let the status/AVD checks below decide whether the probe itself completed.
     if (!CheckEquivalentAccessChannels(
             context, context, "process", "setcurrent",
-            allowed, channel_mismatch, sequence) || !allowed) {
-        return ProbeError("security:compute_av");
+            allowed, channel_mismatch, sequence)) {
+        result |= ProbeError("optional security:compute_av");
+    } else {
+        if (!allowed) LOGD("DirtySepolicy: app_zygote setcurrent is denied by OEM policy");
+        if (sequence == 0) result |= APP_ZYGOTE_AVD_SEQUENCE_ANOMALY;
+        if (channel_mismatch) result |= APP_ZYGOTE_USERSPACE_QUERY_TAMPERED;
     }
-    if (sequence == 0) result |= APP_ZYGOTE_AVD_SEQUENCE_ANOMALY;
-    if (channel_mismatch) result |= APP_ZYGOTE_USERSPACE_QUERY_TAMPERED;
 
     if (!CheckEquivalentAccessChannels(
             context, context, "process", "execmem",
             allowed, channel_mismatch, sequence)) {
-        return result | ProbeError("app_zygote execmem control");
+        result |= ProbeError("optional app_zygote execmem control");
+    } else {
+        if (!allowed) result |= APP_ZYGOTE_ACCESS_ORACLE_TAMPERED;
+        if (channel_mismatch) result |= APP_ZYGOTE_USERSPACE_QUERY_TAMPERED;
+        if (sequence == 0) result |= APP_ZYGOTE_AVD_SEQUENCE_ANOMALY;
     }
-    if (!allowed) result |= APP_ZYGOTE_ACCESS_ORACLE_TAMPERED;
-    if (channel_mismatch) result |= APP_ZYGOTE_USERSPACE_QUERY_TAMPERED;
-    if (sequence == 0) result |= APP_ZYGOTE_AVD_SEQUENCE_ANOMALY;
 
     if (!CheckEquivalentAccessChannels(
             context, "u:r:kernel:s0", "security", "check_context",
-            allowed, channel_mismatch, sequence) || !allowed) {
-        return result | ProbeError("security:check_context");
+            allowed, channel_mismatch, sequence)) {
+        result |= ProbeError("optional security:check_context");
+    } else {
+        if (!allowed) LOGD("DirtySepolicy: security check_context is denied by OEM policy");
+        if (channel_mismatch) result |= APP_ZYGOTE_USERSPACE_QUERY_TAMPERED;
+        if (sequence == 0) result |= APP_ZYGOTE_AVD_SEQUENCE_ANOMALY;
     }
-    if (channel_mismatch) result |= APP_ZYGOTE_USERSPACE_QUERY_TAMPERED;
-    if (sequence == 0) result |= APP_ZYGOTE_AVD_SEQUENCE_ANOMALY;
 
     // All Android domains have stable self process permissions. dsp_bypass
     // scrubs the whole system_server -> system_server decision regardless of
@@ -1164,7 +1174,11 @@ void FindAppZygoteDetection(JNIEnv *env, jobject context) {
     if (flags & APP_ZYGOTE_RESULT_UNAVAILABLE) {
         MarkProbeUnavailable(1, "system.app_zygote.process");
     }
-    if (flags & APP_ZYGOTE_SEPOLICY_PROBE_ERROR) {
+    // CheckDirtySepolicy can complete with an OEM policy omitting optional access-vector
+    // permissions. Only an incomplete/fatal preload result makes the whole SELinux probe
+    // unavailable; a completed result keeps the available policy findings usable.
+    if ((flags & APP_ZYGOTE_SEPOLICY_PROBE_ERROR) &&
+        !(flags & APP_ZYGOTE_CHECK_COMPLETED)) {
         MarkProbeUnavailable(1, "system.app_zygote.sepolicy");
     }
     MarkDirtySepolicy(flags & kDirtySepolicyFindingMask);

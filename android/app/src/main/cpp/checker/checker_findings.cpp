@@ -165,17 +165,6 @@ std::vector<NativeFinding> BuildDeviceFindings(
                                     after.kernelSuVersion, after.kernelSuFlags));
         }
     }
-    if (after.throneHuntDetected && !before.throneHuntDetected) {
-        AddDetected(findings, layer, severity,
-                    "device.root.kernelsu.throne_hunt",
-                    fmt::format(
-                            "{{\"baselineOpen\":{},\"baselineAccess\":{},"
-                            "\"finalOpen\":{},\"finalAccess\":{},"
-                            "\"finalRaw\":{},\"finalInvalid\":{}}}",
-                            after.throneHuntBaselineOpen, after.throneHuntBaselineAccess,
-                            after.throneHuntFinalOpen, after.throneHuntFinalAccess,
-                            after.throneHuntFinalRaw, after.throneHuntFinalInvalid));
-    }
     AddRules(findings, layer, severity, hidden, {
             {1u << 1, "device.proc.access_timing"},
             {1u << 2, "device.proc.access_chain"},
@@ -348,6 +337,7 @@ std::vector<NativeFinding> BuildHardwareFindings(
             {KEY_ATTEST_READ_PATH_TIMING, "hardware.attestation.read_path_timing"},
             {KEY_ATTEST_KEY_ID_CONSISTENCY, "hardware.attestation.key_id_consistency"},
             {KEY_ATTEST_KEYSTORE_LEDGER, "hardware.attestation.keystore_ledger"},
+            {1ULL << 63, "hardware.attestation.aidl_trailing_data"},
 
             {1ULL << 62, "hardware.attestation.unknown"},
     });
@@ -377,11 +367,7 @@ RiskSnapshot CaptureRiskSnapshot() {
             sInconsistentMount, sPropertyAreaModified, sPropertyItemModified,
             sFoundInjection, sEvilBridge, sFutileHide, sConventionalTests,
             sDirtySepolicy, sKernelSuProbe, sKernelSuVersion, sKernelSuFlags,
-            sKernelSuUapiVersion, sThroneHuntAvailable, sThroneHuntDetected,
-            sThroneHuntBaselineOpen, sThroneHuntBaselineAccess,
-            sThroneHuntFinalOpen, sThroneHuntFinalAccess,
-            sThroneHuntFinalRaw, sThroneHuntFinalInvalid,
-            sTeeSimulator, sReadProc,
+            sKernelSuUapiVersion, sTeeSimulator, sReadProc,
             sAbnormalKey, sKeyAttestationFlags, sUnavailableProbes.size()};
 }
 

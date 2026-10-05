@@ -1,7 +1,6 @@
 package com.lingqing.trustattestor
 
 import android.content.Context
-import org.json.JSONObject
 
 /**
  * The only owner of user-facing Finding copy.
@@ -11,10 +10,6 @@ import org.json.JSONObject
  */
 object FindingTextCatalog {
     private data class Copy(val zh: String, val en: String)
-
-    private const val THRONE_HUNT_UNAVAILABLE =
-        "device.root.kernelsu.throne_hunt.unavailable"
-    private const val MAX_STRUCTURED_EVIDENCE_LENGTH = 320
 
     private fun isEnglish(context: Context): Boolean =
         context.resources.configuration.locales[0].language.equals("en", true)
@@ -37,104 +32,13 @@ object FindingTextCatalog {
             finding.title.isNotBlank() && !key.startsWith("native.") -> finding.title
             else -> if (english) "Unrecognized native anomaly" else "检测到未识别的原生异常"
         }
-        val structuredEvidence = throneHuntUnavailableEvidence(
-            key = key,
-            layer = finding.layer,
-            status = finding.status,
-            dataJson = finding.dataJson,
-            english = english
-        )
         val rawEvidence = when {
-            structuredEvidence.isNotBlank() -> structuredEvidence
             BuildConfig.DEBUG -> serverEvidence.ifBlank { finding.evidence }
             else -> ""
         }
         val evidence = HardwareTextLocalization.evidence(rawEvidence, english)
         return finding.copy(title = title, evidence = evidence, messageKey = key)
     }
-
-    fun shouldShowEvidenceInRelease(probeId: String?): Boolean =
-        probeId == THRONE_HUNT_UNAVAILABLE
-
-    internal fun throneHuntUnavailableEvidence(
-        key: String,
-        layer: Int,
-        status: FindingStatus,
-        dataJson: String,
-        english: Boolean
-    ): String {
-        if (key != THRONE_HUNT_UNAVAILABLE || layer != 0 || status != FindingStatus.UNAVAILABLE) {
-            return ""
-        }
-        return runCatching {
-            val data = JSONObject(dataJson)
-            val counts = data.optJSONObject("counts")
-            val safeCounts = buildMap {
-                countFields.forEach { field ->
-                    if (counts?.has(field.key) == true) {
-                        put(
-                            field.key,
-                            counts.optLong(field.key, 0L).coerceIn(0L, 4_294_967_295L)
-                        )
-                    }
-                }
-            }
-            formatThroneHuntUnavailableEvidence(
-                stageKey = data.optString("stage"),
-                errno = data.optInt("errno", 0).takeIf { data.has("errno") },
-                counts = safeCounts,
-                english = english
-            )
-        }.getOrDefault("")
-    }
-
-    internal fun formatThroneHuntUnavailableEvidence(
-        stageKey: String,
-        errno: Int?,
-        counts: Map<String, Long>,
-        english: Boolean
-    ): String {
-        val stage = stageCopy[stageKey] ?: Copy("运行阶段", "runtime stage")
-        val parts = mutableListOf(
-            if (english) "Stage: ${stage.en}" else "阶段：${stage.zh}"
-        )
-        errno?.let { parts += "errno=${it.coerceAtLeast(0)}" }
-
-        val countParts = countFields.mapNotNull { field ->
-            val value = counts[field.key]?.coerceIn(0L, 4_294_967_295L)
-                ?: return@mapNotNull null
-            "${if (english) field.en else field.zh}=$value"
-        }
-        if (countParts.isNotEmpty()) {
-            parts += (if (english) "Event counts: " else "事件计数：") +
-                countParts.joinToString(", ")
-        }
-        return parts.joinToString(if (english) "; " else "；")
-            .take(MAX_STRUCTURED_EVIDENCE_LENGTH)
-    }
-
-    private data class CountField(val key: String, val zh: String, val en: String)
-
-    private val stageCopy = mapOf(
-        "carrier_bind" to Copy("载体服务绑定", "carrier service binding"),
-        "watch_setup" to Copy("监视器初始化", "watch setup"),
-        "baseline" to Copy("基线事件采集", "baseline event collection"),
-        "stimulus" to Copy("包管理器刺激", "PackageManager stimulus"),
-        "final_drain" to Copy("最终事件采集", "final event collection"),
-        "payload" to Copy("结果载荷解析", "result payload parsing")
-    )
-
-    private val countFields = listOf(
-        CountField("baselineOpen", "基线 open", "baseline open"),
-        CountField("baselineAccess", "基线 access", "baseline access"),
-        CountField("baselineInvalid", "基线 invalid", "baseline invalid"),
-        CountField("baselineNamedNoise", "基线 named-noise", "baseline named-noise"),
-        CountField("finalOpen", "最终 open", "final open"),
-        CountField("finalAccess", "最终 access", "final access"),
-        CountField("finalRaw", "最终 raw", "final raw"),
-        CountField("finalInvalid", "最终 invalid", "final invalid"),
-        CountField("finalNamedNoise", "最终 named-noise", "final named-noise")
-    )
 
     fun layerTitle(context: Context, layer: Int): String {
         val en = isEnglish(context)
@@ -193,8 +97,8 @@ object FindingTextCatalog {
 
     private val unavailableProbeNames: Map<String, Copy> = mapOf(
         "hardware.attestation.attest_key_descriptor_delegation" to Copy(
-            "AttestKey KeyDescriptor 直接委派检测",
-            "Direct AttestKey KeyDescriptor delegation check"
+            "App AttestKey 能力/KeyDescriptor 委派检测",
+            "App AttestKey capability/KeyDescriptor delegation check"
         ),
         "hardware.attestation.cross_sign" to Copy("AttestKey 交叉签名检测", "AttestKey cross-sign check"),
         "hardware.attestation.certificate_graph" to Copy("AttestKey 证书图谱检测", "AttestKey certificate-graph check"),
@@ -252,8 +156,6 @@ object FindingTextCatalog {
         finding("device.tool.shizuku", "检测到 Shizuku 痕迹", "Shizuku trace detected")
         finding("device.tool.gameguardian", "检测到 GameGuardian 痕迹", "GameGuardian trace detected")
         finding("device.root.kernelsu", "检测到 KernelSU 痕迹", "KernelSU trace detected")
-        finding("device.root.kernelsu.throne_hunt", "检测到异常的包目录遍历行为", "Detected anomalous package-directory traversal behavior")
-        finding("device.root.kernelsu.throne_hunt.unavailable", "KernelSU 管理器恢复遍历观察未完成", "KernelSU manager-recovery traversal observation did not complete")
         finding("device.root.kernelsu.uapi", "检测到 KernelSU 内核 UAPI", "KernelSU kernel UAPI detected")
         finding("device.root.kernelsu.late_load", "检测到 KernelSU late-load 越狱模式", "KernelSU late-load jailbreak mode detected")
         finding("device.property.persistent_suspicious", "检测到可疑持久化系统属性", "Suspicious persistent system property detected")
@@ -288,7 +190,7 @@ object FindingTextCatalog {
         finding("system.service.superuser", "SuperUser 服务链路异常", "Abnormal SuperUser service path")
         finding("system.teesim.admin_protocol", "检测到 TEESimulator 协议服务", "TEESimulator protocol service detected")
         finding("system.teesim.control_socket", "检测到 TEESimulator 控制 Socket", "TEESimulator control socket detected")
-        finding("system.teesim.rs_soter_protocol", "检测到 TEESimulator-RS SOTER 伪造协议", "TEESimulator-RS SOTER forgery protocol detected")
+        finding("system.teesim.rs_soter_protocol", "检测到 SOTER 伪造协议", "SOTER forgery protocol detected")
         finding("system.selinux.permissive", "SELinux 处于 Permissive 模式", "SELinux is in permissive mode")
         finding("system.selinux.system_server_execmem", "检测到 system_server execmem 策略规则", "system_server execmem policy rule detected")
         finding("system.selinux.aosp_su_transition", "user 构建中存在 AOSP su 域转换规则", "AOSP su domain transition exists in a user build")
@@ -326,8 +228,8 @@ object FindingTextCatalog {
         finding("hardware.attestation.oversized_challenge", "异常超长 Challenge 被接受", "Oversized challenge was accepted")
         finding(
             "hardware.attestation.attest_key_descriptor_delegation",
-            "AttestKey KeyDescriptor 直接委派异常",
-            "Direct AttestKey KeyDescriptor delegation anomaly"
+            "App AttestKey 能力或 KeyDescriptor 委派异常",
+            "App AttestKey capability or KeyDescriptor delegation anomaly"
         )
         finding(
             "hardware.attestation.trust_validation",
@@ -372,9 +274,11 @@ object FindingTextCatalog {
         finding("hardware.attestation.isolated_chain", "隔离进程返回的证明链不一致", "Attestation chain differs in the isolated process")
         finding("hardware.attestation.chain_read_stability", "同一密钥的完整证明链读取结果不一致", "Full attestation chain differs across reads of the same key")
         finding("hardware.attestation.certificate_round_trip", "原证书链回写后密钥记录不一致", "Key record changed after reinstalling its original certificate chain")
-        finding("hardware.attestation.binder_locality", "Keystore 返回了当前进程的本地 Binder 对象", "Keystore returned a Binder object local to this process")
+        finding("hardware.attestation.binder_locality", "Keystore 返回了带 NDK 用户数据的 OMK synthetic Binder", "Keystore returned an OMK synthetic Binder with NDK user data")
         finding("hardware.attestation.interface_token_dispatch", "错误接口令牌被分发到 Keystore maintenance 事务", "A wrong interface token was dispatched to a Keystore maintenance transaction")
+        finding("hardware.attestation.aidl_trailing_data", "Keystore AIDL 或合成 Binder 接受了非法尾部数据", "Keystore AIDL or synthetic Binder accepted trailing data")
         finding("hardware.attestation.parameter_fingerprint", "KeyMint 参数错误画像命中软件转发特征", "KeyMint parameter-error profile matches software forwarding")
+        finding("hardware.attestation.backend_provenance", "KeyMint 参数错误链来自 OMK 后端", "KeyMint parameter-error chain came from an OMK backend")
         finding("hardware.attestation.teesim_parameter_fingerprint", "TeeSim 参数不变量被违反", "TeeSim parameter invariant was violated")
         finding("hardware.attestation.reply_lag", "证明密钥在生成调用返回前持续提前可见", "Attested keys became persistently visible before generation returned")
         finding("hardware.attestation.read_path_timing", "证明密钥原始读取路径出现稳定额外延迟", "Attested-key raw reads show stable additional latency")
@@ -391,7 +295,9 @@ object FindingTextCatalog {
         finding("hardware.attestation.metadata_security_level.unavailable", "KeyMetadata securityLevel 范围检测未完成", "KeyMetadata securityLevel range check did not complete")
         finding("hardware.attestation.binder_locality.unavailable", "Keystore Binder 本地性检测未完成", "Keystore Binder-locality check did not complete")
         finding("hardware.attestation.interface_token_dispatch.unavailable", "错误接口令牌分发检测未完成", "Wrong-interface-token dispatch check did not complete")
+        finding("hardware.attestation.aidl_trailing_data.unavailable", "Keystore AIDL 尾部数据检测未完成", "Keystore AIDL trailing-data check did not complete")
         finding("hardware.attestation.parameter_fingerprint.unavailable", "KeyMint 参数指纹检测未完成", "KeyMint parameter-fingerprint check did not complete")
+        finding("hardware.attestation.backend_provenance.unavailable", "后端来源指纹检测未完成", "Backend provenance fingerprint check did not complete")
         finding("hardware.attestation.teesim_parameter_fingerprint.unavailable", "TeeSim 参数指纹检测未完成", "TeeSim parameter-fingerprint check did not complete")
         finding("hardware.attestation.reply_lag.unavailable", "证明回复时差检测未完成", "Attestation reply-lag check did not complete")
         finding("hardware.attestation.read_path_timing.unavailable", "原始读取路径时序检测未完成", "Raw read-path timing check did not complete")
@@ -500,13 +406,14 @@ object FindingTextCatalog {
         "progress.hardware.probe.certificate_record" to Copy("正在核对完整证明链与证书回写一致性…", "Checking full-chain reads and certificate round-trip consistency…"),
         "progress.hardware.probe.metadata_security_level" to Copy("正在核对 KeyMetadata 安全级别枚举…", "Checking KeyMetadata security-level values…"),
         "progress.hardware.probe.attest_key_descriptor_delegation" to Copy(
-            "正在核对 AttestKey KeyDescriptor 直接委派…",
-            "Checking direct AttestKey KeyDescriptor delegation…"
+            "正在核对 App AttestKey 能力与 KeyDescriptor 委派…",
+            "Checking App AttestKey capability and KeyDescriptor delegation…"
         ),
         "progress.hardware.probe.binder_locality" to Copy("正在核对 Keystore Binder 本地性…", "Checking Keystore Binder locality…"),
         "progress.hardware.probe.reply_lag" to Copy("正在测量密钥可见与生成回复时差…", "Measuring key visibility against generation replies…"),
         "progress.hardware.probe.read_path_timing" to Copy("正在校准原始密钥读取路径时序…", "Calibrating raw key-read timing…"),
         "progress.hardware.probe.interface_token_dispatch" to Copy("正在检查错误接口令牌分发…", "Checking wrong-interface-token dispatch…"),
+        "progress.hardware.probe.aidl_trailing_data" to Copy("正在检查 Keystore AIDL 与合成 Binder 尾部数据…", "Checking Keystore AIDL and synthetic Binder trailing-data handling…"),
         "progress.hardware.probe.parameter_fingerprint" to Copy("正在检查 KeyMint 参数指纹…", "Checking the KeyMint parameter fingerprint…"),
         "progress.hardware.probe.teesim_parameter_fingerprint" to Copy("正在检查 TeeSim 参数不变量…", "Checking TeeSim parameter invariants…"),
         "progress.hardware.probe.key_id_consistency" to Copy("正在核对 APP 与 KEY_ID 读取路径…", "Comparing APP and KEY_ID read paths…"),

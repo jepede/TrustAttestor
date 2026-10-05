@@ -40,11 +40,6 @@ package="com.lingqing.trustattestor">
         android:exported="false"
         android:isolatedProcess="true"
         android:useAppZygote="true">
-        <intent-filter>
-            <action android:name="com.lingqing.trustattestor.THRONE_HUNT_MIME_ANCHOR" />
-            <category android:name="android.intent.category.DEFAULT" />
-            <data android:mimeGroup="trustattestor-throne-hunt" />
-        </intent-filter>
     </service>
 
     <service

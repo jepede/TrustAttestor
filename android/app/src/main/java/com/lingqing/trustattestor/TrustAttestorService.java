@@ -21,12 +21,6 @@ public class TrustAttestorService extends Service {
                 if (reply != null) {
                     if (code == 1) {
                         reply.writeInt(TrustAttestorZygotePreload.success);
-                    } else if (code == 2) {
-                        reply.writeString(TrustAttestorZygotePreload.throneHuntWatchState());
-                    } else if (code == 3) {
-                        reply.writeString(TrustAttestorZygotePreload.throneHuntWatchDrain());
-                    } else if (code == 4) {
-                        reply.writeString(TrustAttestorZygotePreload.throneHuntWatchReset());
                     } else {
                         reply.writeInt(0);
                     }

@@ -1136,7 +1136,7 @@ class HomeFragment : Fragment() {
 
     private fun evidenceText(row: EvidenceRow): String = buildString {
         append(row.label)
-        if ((BuildConfig.DEBUG || FindingTextCatalog.shouldShowEvidenceInRelease(row.probeId)) &&
+        if (BuildConfig.DEBUG &&
             row.evidence.isNotBlank() && row.evidence != row.label
         ) {
             append('\n')

@@ -89,6 +89,21 @@ APP_BASE_NAME=${0##*/}
 APP_HOME=$( cd -P "${APP_HOME:-./}" > /dev/null && printf '%s
 ' "$PWD" ) || exit
 
+# Keep all Gradle user state, temporary files and project caches outside the checkout.
+TRUST_ATTESTOR_BUILD_ROOT=${TRUST_ATTESTOR_BUILD_ROOT:-"$APP_HOME/../../TrustAttestor-build"}
+mkdir -p "$TRUST_ATTESTOR_BUILD_ROOT" || exit 1
+TRUST_ATTESTOR_BUILD_ROOT=$( cd -P "$TRUST_ATTESTOR_BUILD_ROOT" && pwd ) || exit 1
+GRADLE_USER_HOME="$TRUST_ATTESTOR_BUILD_ROOT/gradle-user"
+ANDROID_USER_HOME="$TRUST_ATTESTOR_BUILD_ROOT/android-user"
+TRUST_ATTESTOR_TEMP="$TRUST_ATTESTOR_BUILD_ROOT/temp"
+mkdir -p "$TRUST_ATTESTOR_BUILD_ROOT" "$GRADLE_USER_HOME" "$ANDROID_USER_HOME" "$TRUST_ATTESTOR_TEMP" "$TRUST_ATTESTOR_BUILD_ROOT/java-user"
+export TRUST_ATTESTOR_BUILD_ROOT GRADLE_USER_HOME ANDROID_USER_HOME TRUST_ATTESTOR_TEMP
+export TEMP="$TRUST_ATTESTOR_TEMP"
+export TMP="$TRUST_ATTESTOR_TEMP"
+export TMPDIR="$TRUST_ATTESTOR_TEMP"
+JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-Duser.home=\"$TRUST_ATTESTOR_BUILD_ROOT/java-user\" -Djava.io.tmpdir=\"$TRUST_ATTESTOR_TEMP\""
+export JAVA_TOOL_OPTIONS
+
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 
@@ -144,6 +159,14 @@ location of your Java installation."
 fi
 
 # Increase the maximum file descriptors if we can.
+if [ ! -f "$ANDROID_USER_HOME/debug.keystore" ]; then
+    TRUST_ATTESTOR_KEYTOOL=${JAVA_HOME:+"$JAVA_HOME/bin/"}keytool
+    "$TRUST_ATTESTOR_KEYTOOL" -genkeypair -keystore "$ANDROID_USER_HOME/debug.keystore" \
+        -storepass android -keypass android -alias androiddebugkey \
+        -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 \
+        >/dev/null 2>&1 || die "Could not create the external debug keystore."
+fi
+
 if ! "$cygwin" && ! "$darwin" && ! "$nonstop" ; then
     case $MAX_FD in #(
       max*)
@@ -215,6 +238,9 @@ set -- \
         "-Dorg.gradle.appname=$APP_BASE_NAME" \
         -classpath "$CLASSPATH" \
         org.gradle.wrapper.GradleWrapperMain \
+        --project-cache-dir "$TRUST_ATTESTOR_BUILD_ROOT/gradle-project" \
+        "-Pkotlin.project.persistent.dir=$TRUST_ATTESTOR_BUILD_ROOT/kotlin-project" \
+        -Pkotlin.project.persistent.dir.gradle.disableWrite=true \
         "$@"
 
 # Stop when "xargs" is not available.

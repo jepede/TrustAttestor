@@ -23,7 +23,7 @@ import javax.crypto.spec.SecretKeySpec;
 final class SilentProbeEvidence {
     private SilentProbeEvidence() { }
 
-    enum Status { VERIFIED, DETECTED, UNAVAILABLE }
+    enum Status { VERIFIED, WARNING, DETECTED, UNAVAILABLE }
 
     static final class Decision {
         final Status status;

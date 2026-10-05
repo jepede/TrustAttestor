@@ -12,6 +12,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--gradle-home', default=os.environ.get('GRADLE_USER_HOME', str(Path.home() / '.gradle')))
     parser.add_argument('--java-home', default=os.environ.get('JAVA_HOME'))
+    default_build_root = os.environ.get(
+        'TRUST_ATTESTOR_BUILD_ROOT',
+        str(Path(__file__).resolve().parents[4] / 'TrustAttestor-build' / 'ui'),
+    )
+    parser.add_argument('--output-dir', default=str(Path(default_build_root) / 'fixture-tests'))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     cache = Path(args.gradle_home) / 'caches/modules-2/files-2.1'
@@ -35,7 +40,10 @@ def main():
                  jar('org.jetbrains.kotlinx', 'kotlinx-coroutines-core-jvm', '1.6.4')]
     java = str(Path(args.java_home) / 'bin/java') if args.java_home else 'java'
     package = root / 'app/src/preview/java/com/lingqing/trustattestor'
-    output = root / 'build/fixture-tests'
+    output = Path(args.output_dir).expanduser().resolve()
+    repository_root = root.parents[1]
+    if output == repository_root or output.is_relative_to(repository_root):
+        raise RuntimeError(f'Fixture output must be outside the repository: {output}')
     output.mkdir(parents=True, exist_ok=True)
     models = (package / 'FindingModels.kt').read_text(encoding='utf-8')
     models = 'package com.lingqing.trustattestor\n\n' + models[

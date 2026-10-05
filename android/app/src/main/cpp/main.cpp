@@ -1,6 +1,9 @@
 #include <jni.h>
+#include <android/binder_ibinder.h>
+#include <android/binder_ibinder_jni.h>
+#include <dlfcn.h>
+
 #include "checker/logging.h"
-#include "checker/checker_kernelsu_throne.h"
 
 void checker_run(JNIEnv *env, jobject context, jobject callback);
 jstring checker_collect_cloud_device_evidence(JNIEnv *env);
@@ -10,10 +13,6 @@ jbyteArray checker_cloud_sha256(JNIEnv *env, jbyteArray payload);
 jboolean checker_verify_cloud_verdict(
         JNIEnv *env, jbyteArray payload, jbyteArray signature, jbyteArray public_key);
 JNIEXPORT jint JNICALL TrustAttestorZygotePreload_check(JNIEnv *env, jobject thiz);
-JNIEXPORT jstring JNICALL TrustAttestorZygotePreload_installThroneHuntWatch(JNIEnv *env, jclass clazz, jstring source_dir);
-JNIEXPORT jstring JNICALL TrustAttestorZygotePreload_throneHuntWatchState(JNIEnv *env, jclass clazz);
-JNIEXPORT jstring JNICALL TrustAttestorZygotePreload_throneHuntWatchDrain(JNIEnv *env, jclass clazz);
-JNIEXPORT jstring JNICALL TrustAttestorZygotePreload_throneHuntWatchReset(JNIEnv *env, jclass clazz);
 JNIEXPORT jint JNICALL TrustAttestorReadProcProbe_check(JNIEnv *env, jobject thiz);
 
 static void native_run(JNIEnv *env, jobject thiz, jobject context, jobject callback) {
@@ -55,25 +54,86 @@ static jint native_read_proc_check(JNIEnv *env, jobject thiz) {
     return TrustAttestorReadProcProbe_check(env, thiz);
 }
 
-static jstring native_install_throne_hunt_watch(JNIEnv* env, jclass, jstring source_dir) {
-    const auto payload = InstallThroneHuntWatch(env, source_dir);
-    return env->NewStringUTF(payload.c_str());
+namespace {
+
+// Keep the NDK Binder dependency dynamically resolved. TrustAttestor still
+// supports API 27, while AIBinder_fromJavaBinder/isRemote/getUserData were
+// introduced in API 29. The DEX probe already gates itself to API 31, but a
+// missing symbol must remain a normal unavailable result rather than preventing
+// the native library from loading on older releases.
+constexpr jlong kBinderAttributesAvailable = 1LL << 0;
+constexpr jlong kBinderAttributesRemote = 1LL << 1;
+constexpr jlong kBinderAttributesUserData = 1LL << 2;
+constexpr jlong kBinderAttributesClass = 1LL << 3;
+constexpr jlong kBinderAttributesUnavailable = -1;
+
+using BinderFromJavaFn = AIBinder *(*)(JNIEnv *, jobject);
+using BinderIsRemoteFn = bool (*)(const AIBinder *);
+using BinderGetUserDataFn = void *(*)(AIBinder *);
+using BinderGetClassFn = const AIBinder_Class *(*)(AIBinder *);
+using BinderDecStrongFn = void (*)(AIBinder *);
+
+struct BinderApi {
+    void *handle = nullptr;
+    BinderFromJavaFn fromJava = nullptr;
+    BinderIsRemoteFn isRemote = nullptr;
+    BinderGetUserDataFn getUserData = nullptr;
+    BinderGetClassFn getClass = nullptr;
+    BinderDecStrongFn decStrong = nullptr;
+
+    bool ready() const {
+        return handle != nullptr && fromJava != nullptr && isRemote != nullptr
+                && getUserData != nullptr && getClass != nullptr && decStrong != nullptr;
+    }
+};
+
+template <typename T>
+T binderSymbol(void *handle, const char *name) {
+    return handle == nullptr
+            ? nullptr
+            : reinterpret_cast<T>(dlsym(handle, name));
 }
 
-static jstring native_throne_hunt_watch_state(JNIEnv* env, jclass) {
-    const auto payload = ThroneHuntWatchState();
-    return env->NewStringUTF(payload.c_str());
+const BinderApi &binderApi() {
+    static const BinderApi api = [] {
+        BinderApi value;
+        value.handle = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_LOCAL);
+        if (value.handle == nullptr) return value;
+        value.fromJava = binderSymbol<BinderFromJavaFn>(
+                value.handle, "AIBinder_fromJavaBinder");
+        value.isRemote = binderSymbol<BinderIsRemoteFn>(
+                value.handle, "AIBinder_isRemote");
+        value.getUserData = binderSymbol<BinderGetUserDataFn>(
+                value.handle, "AIBinder_getUserData");
+        value.getClass = binderSymbol<BinderGetClassFn>(
+                value.handle, "AIBinder_getClass");
+        value.decStrong = binderSymbol<BinderDecStrongFn>(
+                value.handle, "AIBinder_decStrong");
+        return value;
+    }();
+    return api;
 }
 
-static jstring native_throne_hunt_watch_drain(JNIEnv* env, jclass) {
-    const auto payload = ThroneHuntWatchDrain();
-    return env->NewStringUTF(payload.c_str());
+jlong native_binder_attributes(JNIEnv *env, jobject, jobject java_binder) {
+    if (java_binder == nullptr) return kBinderAttributesUnavailable;
+    const BinderApi &api = binderApi();
+    if (!api.ready()) return kBinderAttributesUnavailable;
+
+    AIBinder *binder = api.fromJava(env, java_binder);
+    if (binder == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return kBinderAttributesUnavailable;
+    }
+
+    jlong result = kBinderAttributesAvailable;
+    if (api.isRemote(binder)) result |= kBinderAttributesRemote;
+    if (api.getUserData(binder) != nullptr) result |= kBinderAttributesUserData;
+    if (api.getClass(binder) != nullptr) result |= kBinderAttributesClass;
+    api.decStrong(binder);
+    return result;
 }
 
-static jstring native_throne_hunt_watch_reset(JNIEnv* env, jclass) {
-    const auto payload = ThroneHuntWatchReset();
-    return env->NewStringUTF(payload.c_str());
-}
+}  // namespace
 
 static int get_sdk_int(JNIEnv *env) {
     jclass version_class = env->FindClass("android/os/Build$VERSION");
@@ -127,6 +187,11 @@ static JNINativeMethod gMethods[] = {
                 const_cast<char *>("nativeVerifyCloudVerdict"),
                 const_cast<char *>("([B[B[B)Z"),
                 reinterpret_cast<void *>(native_verify_cloud_verdict)
+        },
+        {
+                const_cast<char *>("nativeBinderAttributes"),
+                const_cast<char *>("(Landroid/os/IBinder;)J"),
+                reinterpret_cast<void *>(native_binder_attributes)
         }
 };
 
@@ -136,26 +201,6 @@ static JNINativeMethod gZygotePreloadMethods[] = {
                 const_cast<char *>("()I"),
                 reinterpret_cast<void *>(native_check)
         },
-        {
-                const_cast<char *>("installThroneHuntWatch"),
-                const_cast<char *>("(Ljava/lang/String;)Ljava/lang/String;"),
-                reinterpret_cast<void *>(native_install_throne_hunt_watch)
-        },
-        {
-                const_cast<char *>("throneHuntWatchState"),
-                const_cast<char *>("()Ljava/lang/String;"),
-                reinterpret_cast<void *>(native_throne_hunt_watch_state)
-        },
-        {
-                const_cast<char *>("throneHuntWatchDrain"),
-                const_cast<char *>("()Ljava/lang/String;"),
-                reinterpret_cast<void *>(native_throne_hunt_watch_drain)
-        },
-        {
-                const_cast<char *>("throneHuntWatchReset"),
-                const_cast<char *>("()Ljava/lang/String;"),
-                reinterpret_cast<void *>(native_throne_hunt_watch_reset)
-        }
 };
 
 static JNINativeMethod gReadProcProbeMethods[] = {

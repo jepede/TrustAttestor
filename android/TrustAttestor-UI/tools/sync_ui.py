@@ -23,6 +23,7 @@ ROOT_KOTLIN = frozenset({
 UI_ROOT = JAVA_ROOT + "ui/"
 RES_ROOT = "app/src/main/res/"
 MANIFEST_NAME = "ui-sync-manifest.json"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 SYNC_STATUSES = frozenset({"NEW", "UPDATE", "ADOPT"})
 WINDOWS_RESERVED_NAMES = frozenset({"con", "prn", "aux", "nul", "conin$", "conout$"}) | {
     prefix + str(number) for prefix in ("com", "lpt") for number in range(1, 10)
@@ -218,6 +219,22 @@ def _atomic_write(root: Path, relative: str, data: bytes) -> None:
             temporary.unlink()
 
 
+def _backup_root(destination_root: Path) -> Path:
+    """Keep backups for this checkout outside the repository."""
+    try:
+        destination_root.relative_to(REPOSITORY_ROOT)
+    except ValueError:
+        return destination_root / "build/ui-sync-backups"
+    configured = os.environ.get("TRUST_ATTESTOR_BUILD_ROOT")
+    root = (Path(configured) if configured else
+            REPOSITORY_ROOT.parent / "TrustAttestor-build" / "ui").expanduser().resolve()
+    try:
+        root.relative_to(REPOSITORY_ROOT)
+    except ValueError:
+        return root / "ui-sync-backups"
+    raise SyncError(f"External backup root must be outside the repository: {root}")
+
+
 def apply_plan(plan: Plan) -> Path | None:
     """Reject the whole batch on conflicts or changes since planning; never delete files."""
     if plan.conflicts:
@@ -245,8 +262,7 @@ def apply_plan(plan: Plan) -> Path | None:
         originals[change.path] = destination
 
     name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex
-    backup_relative = "build/ui-sync-backups/" + name
-    backup = _checked_path(plan.destination_root, backup_relative)
+    backup = _backup_root(plan.destination_root) / name
     backup.mkdir(parents=True, exist_ok=False)
     _atomic_write(backup, "ui-sync-manifest.before.json", plan.manifest_bytes)
     for change in selected:

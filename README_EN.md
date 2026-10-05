@@ -17,10 +17,9 @@ TrustAttestor is an Android device-trust diagnostics project for security resear
 git clone --recurse-submodules https://github.com/LingQingBigKing/TrustAttestor.git
 cd TrustAttestor/android
 ./gradlew :dex:check
-./gradlew :app:assembleDebug
 ```
 
-Use `gradlew.bat` on Windows. Android requirements and release signing are documented in the [Android README](android/README_EN.md). Cloud development starts with:
+On Windows, use `android/build-external.ps1 -Variant debug -SigningProperties <external keystore.properties>`; Debug and Release reuse the production signer. This entry point keeps the Gradle user home, project cache, temporary files, DEX, CMake intermediates, and APKs outside the checkout. Direct `gradlew.bat` invocations use the same external build root. Android requirements and signing are documented in the [Android README](android/README_EN.md). Cloud development starts with:
 
 ```bash
 cd cloud

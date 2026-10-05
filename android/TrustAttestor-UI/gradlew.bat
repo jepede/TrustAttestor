@@ -35,6 +35,31 @@ set APP_HOME=%DIRNAME%
 @rem Resolve any "." and ".." in APP_HOME to make it shorter.
 for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
 
+@rem Keep all Gradle user state, temporary files and project caches outside the checkout.
+if not defined TRUST_ATTESTOR_BUILD_ROOT set "TRUST_ATTESTOR_BUILD_ROOT=%APP_HOME%..\..\..\TrustAttestor-build\ui"
+for %%i in ("%TRUST_ATTESTOR_BUILD_ROOT%") do set "TRUST_ATTESTOR_BUILD_ROOT=%%~fi"
+set "GRADLE_USER_HOME=%TRUST_ATTESTOR_BUILD_ROOT%\gradle-user"
+set "ANDROID_USER_HOME=%TRUST_ATTESTOR_BUILD_ROOT%\android-user"
+set "TRUST_ATTESTOR_TEMP=%TRUST_ATTESTOR_BUILD_ROOT%\temp"
+if not exist "%TRUST_ATTESTOR_BUILD_ROOT%" mkdir "%TRUST_ATTESTOR_BUILD_ROOT%"
+if not exist "%GRADLE_USER_HOME%" mkdir "%GRADLE_USER_HOME%"
+if not exist "%ANDROID_USER_HOME%" mkdir "%ANDROID_USER_HOME%"
+if not exist "%TRUST_ATTESTOR_TEMP%" mkdir "%TRUST_ATTESTOR_TEMP%"
+if not exist "%TRUST_ATTESTOR_BUILD_ROOT%\java-user" mkdir "%TRUST_ATTESTOR_BUILD_ROOT%\java-user"
+set "TEMP=%TRUST_ATTESTOR_TEMP%"
+set "TMP=%TRUST_ATTESTOR_TEMP%"
+set "TMPDIR=%TRUST_ATTESTOR_TEMP%"
+if defined JAVA_HOME set "TRUST_ATTESTOR_KEYTOOL=%JAVA_HOME%\bin\keytool.exe"
+if not defined TRUST_ATTESTOR_KEYTOOL set "TRUST_ATTESTOR_KEYTOOL=keytool.exe"
+if not exist "%ANDROID_USER_HOME%\debug.keystore" (
+    "%TRUST_ATTESTOR_KEYTOOL%" -genkeypair -keystore "%ANDROID_USER_HOME%\debug.keystore" -storepass android -keypass android -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 >NUL 2>&1
+)
+if defined JAVA_TOOL_OPTIONS (
+    set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% -Duser.home="%TRUST_ATTESTOR_BUILD_ROOT%\java-user" -Djava.io.tmpdir="%TRUST_ATTESTOR_TEMP%""
+) else (
+    set "JAVA_TOOL_OPTIONS=-Duser.home="%TRUST_ATTESTOR_BUILD_ROOT%\java-user" -Djava.io.tmpdir="%TRUST_ATTESTOR_TEMP%""
+)
+
 @rem Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 set DEFAULT_JVM_OPTS="-Xmx64m" "-Xms64m"
 
@@ -74,7 +99,7 @@ set CLASSPATH=%APP_HOME%\gradle\wrapper\gradle-wrapper.jar
 
 
 @rem Execute Gradle
-"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" org.gradle.wrapper.GradleWrapperMain %*
+"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GRADLE_OPTS% "-Dorg.gradle.appname=%APP_BASE_NAME%" -classpath "%CLASSPATH%" org.gradle.wrapper.GradleWrapperMain --project-cache-dir "%TRUST_ATTESTOR_BUILD_ROOT%\gradle-project" "-Pkotlin.project.persistent.dir=%TRUST_ATTESTOR_BUILD_ROOT%\kotlin-project" -Pkotlin.project.persistent.dir.gradle.disableWrite=true %*
 
 :end
 @rem End local scope for the variables with windows NT shell

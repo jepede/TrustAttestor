@@ -46,14 +46,20 @@ public final class StructuralProbeEvidenceTest {
 
     private static void binderLocalityContract() {
         var optionalRemote = new StructuralProbeEvidence.BinderLeg("getSecurityLevel",
-                StructuralProbeEvidence.BinderLeg.Disposition.REMOTE, "unlink=true");
+                StructuralProbeEvidence.BinderLeg.Disposition.REMOTE, "remote=true");
         var optionalLocal = new StructuralProbeEvidence.BinderLeg("getSecurityLevel",
-                StructuralProbeEvidence.BinderLeg.Disposition.LOCAL, "unlink=false");
+                StructuralProbeEvidence.BinderLeg.Disposition.LOCAL, "remote=false");
+        var syntheticLevel = new StructuralProbeEvidence.BinderLeg("getSecurityLevel",
+                StructuralProbeEvidence.BinderLeg.Disposition.LOCAL, "synthetic",
+                true, true, true, "android.system.keystore2.IKeystoreSecurityLevel",
+                1234, true, true);
         var coreEntryRemote = new StructuralProbeEvidence.BinderLeg("getKeyEntry.iSecurityLevel",
                 StructuralProbeEvidence.BinderLeg.Disposition.REMOTE, "unlink=true");
         var coreOperationRemote = new StructuralProbeEvidence.BinderLeg("IKeystoreOperation",
                 StructuralProbeEvidence.BinderLeg.Disposition.REMOTE, "unlink=true");
         var coreEntryLocal = new StructuralProbeEvidence.BinderLeg("getKeyEntry.iSecurityLevel",
+                StructuralProbeEvidence.BinderLeg.Disposition.LOCAL, "unlink=false");
+        var targetEntryLocal = new StructuralProbeEvidence.BinderLeg("getKeyEntry.target.iSecurityLevel",
                 StructuralProbeEvidence.BinderLeg.Disposition.LOCAL, "unlink=false");
         var optionalMissing = new StructuralProbeEvidence.BinderLeg("getSecurityLevel",
                 StructuralProbeEvidence.BinderLeg.Disposition.UNAVAILABLE, "blocked");
@@ -62,10 +68,14 @@ public final class StructuralProbeEvidenceTest {
         var coreOperationMissing = new StructuralProbeEvidence.BinderLeg("IKeystoreOperation",
                 StructuralProbeEvidence.BinderLeg.Disposition.UNAVAILABLE, "blocked");
 
-        check(StructuralProbeEvidence.binderLocality(List.of(optionalRemote, coreEntryLocal)).status == DETECTED,
-                "a local core reply Binder is sufficient evidence");
-        check(StructuralProbeEvidence.binderLocality(List.of(optionalLocal, coreEntryRemote)).status == DETECTED,
-                "a local optional reply Binder still overrides a remote core leg");
+        check(StructuralProbeEvidence.binderLocality(List.of(optionalRemote, syntheticLevel)).status == DETECTED,
+                "a structurally matching local Binder is independent evidence");
+        check(StructuralProbeEvidence.binderLocality(List.of(optionalLocal, coreEntryLocal)).status
+                        == com.lingqing.trustattestor.SilentProbeEvidence.Status.WARNING,
+                "an unclassified local Binder remains a warning");
+        check(StructuralProbeEvidence.binderLocality(List.of(optionalRemote, targetEntryLocal)).status
+                        == com.lingqing.trustattestor.SilentProbeEvidence.Status.WARNING,
+                "a known-alias local Binder is classified as a core leg");
 
         var entryVerified = StructuralProbeEvidence.binderLocality(List.of(
                 optionalMissing, coreEntryRemote, coreOperationMissing));

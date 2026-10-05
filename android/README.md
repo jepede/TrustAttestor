@@ -30,13 +30,12 @@ TrustAttestor Android 是本项目的本地扫描客户端。它不把一次 API
 - **启动与存储状态**：读取 bootloader/VBMeta 属性，检查解锁、AVB 属性缺失、数据分区未加密、debug ramdisk 和隐藏 ext4 loop 镜像等线索。
 - **Root 与工具痕迹**：检查 `su`、BusyBox、Shizuku、GameGuardian、ADB root 等已知路径或属性；这些是线索，不单独等价于完整 Root 结论。
 - **KernelSU/APatch/ZYGISK**：检查 KernelSU 驱动 FD/UAPI、KSU/APatch 挂载源、`/sys/module/kernelsu` 等路径，以及 Zygisk 隔离/附加行为和相关 mount 残留。
-- **包目录遍历观察**：从当前应用自身的已安装 APK `sourceDir` 解析包目录，使用 inotify 观察目录打开、访问、命名子项噪声、watch 丢失和队列溢出。该项只在路径合法且位于受支持的已安装应用根目录时运行；发现符合恢复扫描特征的异常遍历才返回 `DETECTED`，路径不支持或观察失败返回 `UNAVAILABLE`。
 - **挂载与 namespace**：比较 mountinfo 的 source/target/filesystem、挂载传播关系、peer group、周边路径和子进程看到的挂载视图；incFS、厂商布局和正常安装目录差异必须先满足兼容条件，不能仅因存在不同挂载类型就判异常。
 - **系统属性与 proc 读取**：对 property area/layout、持久化可疑属性、`/proc` 访问链、读取时序和 namespace mismatch 做一致性检查。
 - **内核与进程行为**：比较 `uname`、`/proc` 和 Java `os.version` 的内核身份，检查受控 fork/ptrace、进程回收、匿名可执行内存、映射 inode 和运行时注入路径。
 - **TEE 模拟与相关服务**：检查 TeeSim/RS Soter 管理协议、控制 socket、策略/SELinux 线索和已知服务端点；缺少服务不能直接作为异常。
 
-相关 `probeId` 示例：`device.bootloader.unlocked`、`device.root.kernelsu`、`device.root.kernelsu.throne_hunt`、`system.mount.peer_group`、`system.mount.inconsistent`、`system.readproc.tricky_store`、`system.readproc.teesim_rs_daemon`、`device.kernel.identity_spoofing`。
+相关 `probeId` 示例：`device.bootloader.unlocked`、`device.root.kernelsu`、`system.mount.peer_group`、`system.mount.inconsistent`、`system.readproc.tricky_store`、`system.readproc.teesim_rs_daemon`、`device.kernel.identity_spoofing`。
 
 ### 2. 系统完整性
 
@@ -93,21 +92,31 @@ android/
 
 ## 兼容性与构建
 
-需要 JDK 17、Android SDK Platform 35、Build Tools 35.0.0（DEX 流程还会读取 35.0.1 的 `d8.jar`）、NDK 27.2.12479018 和 SDK 提供的 CMake。先在 `android/local.properties` 配置 SDK：
+需要 JDK 17、Android SDK Platform 35、Build Tools 35.0.0（DEX 流程还会读取 35.0.1 的 `d8.jar`）、NDK 27.2.12479018 和 SDK 提供的 CMake。SDK 由 Android SDK 环境变量或 Android Studio 提供；`local.properties` 仅作为本机配置，不应提交。
 
 ```properties
 sdk.dir=/absolute/path/to/Android/Sdk
 ```
 
+Debug 和 Release 都必须使用仓库外、与正式包相同的签名配置。这样 Debug 包的签名指纹与 Release 一致，Native 签名身份检查不会因为构建类型不同而失效。
+
 Debug：
 
-```bash
-./gradlew :dex:check
-./gradlew :app:testDebugUnitTest
-./gradlew :app:assembleDebug
+```powershell
+# 所有 Gradle 用户状态、项目缓存、Kotlin 状态、CMake staging、DEX、映射和 APK
+# 都写入仓库外的 TrustAttestor-build（可用 -BuildRoot 覆盖）。
+.\build-external.ps1 -Variant debug `
+  -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
 ```
 
-Windows 使用 `gradlew.bat`。Release 需要自己的 JKS；将 `keystore.properties.example` 复制为被忽略的 `keystore.properties`，填入本机路径和密码后执行 `:app:assembleRelease`。不要把签名文件或 APK 放入仓库。
+Release：
+
+```powershell
+.\build-external.ps1 -Variant release `
+  -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
+```
+
+也可以直接执行 `gradlew.bat`；包装脚本会自动将 Gradle 用户目录、临时目录和项目缓存指向外部构建根。不要把签名文件或 APK 放入仓库。
 
 项目使用 Android Gradle Plugin 自带的标准 R8/D8 流程；Skidfuscator、LSParanoid、OLLVM 和检测器内嵌反调试配置已移除。独立反调试示例不属于此客户端，也不会被编译或加载。
 

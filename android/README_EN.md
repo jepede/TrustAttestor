@@ -27,12 +27,11 @@ The native checker reads system calls, `/proc`, mount information, properties, a
 
 - bootloader/VBMeta properties, encryption state, debug ramdisk, hidden ext4 loop images, and mount remnants;
 - `su`, BusyBox, Shizuku, GameGuardian, ADB-root, KernelSU/APatch driver or UAPI traces, and Zygisk-related mount/process evidence;
-- package-directory traversal observation using inotify on the current app's safe installed-APK parent directory, including directory opens/access, named-child noise, queue overflow, and watch loss;
 - mount source/target/filesystem, propagation and peer-group relationships, namespace differences, and incFS/vendor-layout compatibility gates;
 - property-area consistency, `/proc` access chains/timing, kernel identity (`uname`/`/proc`/Java), process reaping, executable mappings, and runtime injection paths;
 - TeeSim/RS-Soter endpoints and service/policy traces, without treating an absent optional service as proof of tampering.
 
-Example IDs include `device.root.kernelsu`, `device.root.kernelsu.throne_hunt`, `system.mount.peer_group`, `system.mount.inconsistent`, `system.readproc.tricky_store`, and `device.kernel.identity_spoofing`.
+Example IDs include `device.root.kernelsu`, `system.mount.peer_group`, `system.mount.inconsistent`, `system.readproc.tricky_store`, and `device.kernel.identity_spoofing`.
 
 ### System integrity
 
@@ -79,19 +78,31 @@ android/
 
 ## Compatibility and build
 
-Requirements: JDK 17, Android SDK Platform 35, Build Tools 35.0.0 (the DEX flow also reads the 35.0.1 `d8.jar`), NDK 27.2.12479018, and SDK CMake. Configure `android/local.properties` with your SDK path:
+Requirements: JDK 17, Android SDK Platform 35, Build Tools 35.0.0 (the DEX flow also reads the 35.0.1 `d8.jar`), NDK 27.2.12479018, and SDK CMake. The SDK can come from Android Studio or the Android SDK environment; `local.properties` is machine-local and must not be committed.
 
 ```properties
 sdk.dir=/absolute/path/to/Android/Sdk
 ```
 
-```bash
-./gradlew :dex:check
-./gradlew :app:testDebugUnitTest
-./gradlew :app:assembleDebug
+Both Debug and Release builds must use the external signing configuration that is used for the
+production package. This keeps the signer fingerprint identical across variants and prevents the
+native signer-identity gate from treating a Debug package as a different application.
+
+```powershell
+# Gradle state, project caches, Kotlin state, CMake staging, DEX, mappings,
+# and APKs are written to the external TrustAttestor-build directory.
+.\build-external.ps1 -Variant debug `
+  -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
 ```
 
-On Windows use `gradlew.bat`. Release builds require your own JKS and ignored `keystore.properties`, copied from `keystore.properties.example`. Keep signing files, APKs, DEX, and logs outside the repository.
+Release:
+
+```powershell
+.\build-external.ps1 -Variant release `
+  -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
+```
+
+Direct `gradlew.bat` invocations also default their Gradle user directory, temporary directory, and project cache to the external build root. Keep signing files and all generated artifacts outside the repository.
 
 The project uses the standard Android Gradle Plugin R8/D8 pipeline. Skidfuscator, LSParanoid, OLLVM, and detector-embedded anti-debug configuration have been removed. The standalone anti-debug example is not part of this client.
 

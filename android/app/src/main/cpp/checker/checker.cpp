@@ -31,7 +31,6 @@ static void ResetUiScanState(JNIEnv* env) {
     sKernelSuFlags = 0;
     sKernelSuUapiVersion = 0;
     sKernelSuMagicErrno = 0;
-    ResetThroneHuntEvidence();
     sTeeSimulator = 0;
     sReadProc = 0;
     runtime_probe::Reset();
@@ -60,7 +59,6 @@ static uint64_t CollectRiskFingerprint() {
     fp ^= (uint64_t) sDirtySepolicy * 0xD6E8FEB86659FD93ULL;
     fp ^= (uint64_t) (sKernelSuProbe & kernelsu_probe::kDetectedMask) *
             0xF1357AEA2E62A9C5ULL;
-    fp ^= (uint64_t) sThroneHuntDetected * 0x8CB92BA72F3D8DD7ULL;
     fp ^= (uint64_t) sTeeSimulator * 0xA24BAED4963EE407ULL;
     fp ^= (uint64_t) (sReadProc & kReadProcFindingMask) * 0xC2B2AE3D27D4EB4FULL;
     fp ^= (uint64_t) sAbnormalKey << 48;
@@ -349,7 +347,6 @@ void checker_run(
                 !runDeviceProbe(300, "progress.device.process_access", "process access", [&] { FindSulist(); }) ||
                 !runDeviceProbe(480, "progress.device.kernel_patch", "kernel patch", [&] { FindAPatch(); }) ||
                 !runDeviceProbe(650, "progress.device.kernelsu", "KernelSU UAPI", [&] { FindKernelSuProbe(); }) ||
-                !runDeviceProbe(760, "progress.device.kernelsu.throne_hunt", "KernelSU throne hunt", [&] { FindThroneHuntDetection(env, context); }) ||
                 !runDeviceProbe(850, "progress.device.environment", "environment", [&] { ConventionalTests(env); }) ||
                 !postProgress(i, 1000, "progress.device.complete")) {
                 env->DeleteLocalRef(callbackClass);
@@ -492,7 +489,6 @@ void checker_run(
             !sConventionalTests &&
             !sDirtySepolicy &&
             !(sKernelSuProbe & kernelsu_probe::kDetectedMask) &&
-            !sThroneHuntDetected &&
             !sTeeSimulator &&
             !(sReadProc & kReadProcFindingMask) &&
             !sAbnormalKey;

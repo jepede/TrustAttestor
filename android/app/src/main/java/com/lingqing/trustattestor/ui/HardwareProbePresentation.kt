@@ -201,7 +201,7 @@ internal object HardwareProbePresentation {
         spec(12, "Oversized challenge accepted", "oversized_challenge"),
         spec(
             13,
-            "Direct AttestKey KeyDescriptor delegation anomaly",
+            "App AttestKey capability or KeyDescriptor delegation anomaly",
             "attest_key_descriptor_delegation",
             unavailable = true
         ),
@@ -253,7 +253,8 @@ internal object HardwareProbePresentation {
         spec(59, "Raw read-path timing anomaly", "read_path_timing", unavailable = true),
         spec(60, "APP / KEY_ID record inconsistency", "key_id_consistency", unavailable = true),
         spec(61, "Keystore state-ledger inconsistency", "keystore_ledger", unavailable = true),
-        spec(62, "Unknown hardware attestation anomaly", "unknown")
+        spec(62, "Unknown hardware attestation anomaly", "unknown"),
+        spec(63, "Keystore AIDL trailing-data anomaly", "aidl_trailing_data", unavailable = true)
     )
 
     private val SPECS_BY_FLAG = FLAG_SPECS.associateBy(FlagSpec::flag)

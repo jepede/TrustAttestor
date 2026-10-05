@@ -1,6 +1,7 @@
 package com.lingqing.trustattestor
 
 import android.content.Context
+import android.os.IBinder
 import org.json.JSONObject
 import java.util.Locale
 
@@ -43,6 +44,14 @@ object TrustAttestorNativeBridge {
         nativeVerifyCloudVerdict(payload, signature, publicKey)
     }.getOrDefault(false)
 
+    /**
+     * Reads only public NDK Binder object attributes. The returned bit mask is
+     * intentionally opaque to the UI and is consumed by the embedded DEX
+     * structural Keystore probe.
+     */
+    @JvmStatic
+    fun binderAttributes(binder: IBinder): Long = nativeBinderAttributes(binder)
+
     private external fun nativeRun(context: Context, callback: NativeScanCallback)
     private external fun nativeCollectCloudDeviceEvidence(): String
     private external fun nativeCreateCloudAttestation(
@@ -56,6 +65,7 @@ object TrustAttestorNativeBridge {
         signature: ByteArray,
         publicKey: ByteArray
     ): Boolean
+    private external fun nativeBinderAttributes(binder: IBinder): Long
 }
 
 fun interface NativeScanCallback {

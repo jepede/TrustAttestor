@@ -23,7 +23,6 @@ add_library(${PROJECT_NAME} STATIC
         checker_sepolicy.cpp
         checker_environment.cpp
         checker_kernelsu.cpp
-        checker_kernelsu_throne.cpp
         checker_readproc.cpp
         checker_security.cpp
         checker_teesim.cpp

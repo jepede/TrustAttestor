@@ -1141,12 +1141,14 @@ void RegisterTimingClock(JNIEnv *env) {
 }
 
 bool IsKnownKeystoreUnavailableProbe(std::string_view id) {
-    static constexpr std::array<std::string_view, 41> kKnown{
+    static constexpr std::array<std::string_view, 43> kKnown{
             "hardware.attestation.attest_key_descriptor_delegation.unavailable",
             "hardware.attestation.metadata_security_level.unavailable",
             "hardware.attestation.binder_locality.unavailable",
             "hardware.attestation.interface_token_dispatch.unavailable",
+            "hardware.attestation.aidl_trailing_data.unavailable",
             "hardware.attestation.parameter_fingerprint.unavailable",
+            "hardware.attestation.backend_provenance.unavailable",
             "hardware.attestation.teesim_parameter_fingerprint.unavailable",
             "hardware.attestation.reply_lag.unavailable",
             "hardware.attestation.read_path_timing.unavailable",

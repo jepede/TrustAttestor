@@ -24,15 +24,50 @@ val ndkVer: String? by project
 val effectiveNdkVersion = ndkVer ?: "27.2.12479018"
 val cloudAttestationUrl = providers.gradleProperty("trustAttestorCloudUrl").orNull.orEmpty()
 val cloudVerdictPublicKey = providers.gradleProperty("trustAttestorCloudVerdictPublicKey").orNull.orEmpty()
+val configuredBuildRoot = providers.gradleProperty("trustAttestorBuildRoot").orNull
+    ?: System.getenv("TRUST_ATTESTOR_BUILD_ROOT")
+    ?: rootProject.projectDir.parentFile.parentFile
+        .resolve("${rootProject.projectDir.parentFile.name}-build")
+        .absolutePath
+val externalBuildRoot = file(configuredBuildRoot).canonicalFile
 fun buildConfigString(value: String): String = "\"" + value
     .replace("\\", "\\\\")
     .replace("\"", "\\\"") + "\""
 
-rootProject.file("keystore.properties").let { f ->
-    if (f.isFile) {
-        Properties().apply {
-            f.inputStream().use { load(it) }
-        }.forEach { k, v -> project.ext[k.toString()] = v }
+val configuredSigningProperties = providers.gradleProperty("trustAttestorSigningProperties").orNull
+    ?: System.getenv("TRUST_ATTESTOR_SIGNING_PROPERTIES")
+configuredSigningProperties?.let { signingPath ->
+    val signingFile = file(signingPath).canonicalFile
+    check(signingFile.isFile) { "External signing properties file is missing: $signingFile" }
+    val repositoryPath = rootProject.projectDir.parentFile.canonicalFile.toPath()
+    check(!signingFile.toPath().startsWith(repositoryPath)) {
+        "Signing properties must be outside the repository."
+    }
+    Properties().apply {
+        signingFile.inputStream().use { load(it) }
+    }.forEach { k, v -> project.ext[k.toString()] = v }
+}
+
+// Debug and release must use the same externally supplied production certificate. Keeping the
+// signing inputs explicit here also makes the signer hash embedded in native code identical for
+// both variants; falling back to the Android debug key would make a debug APK fail its own signer
+// identity check.
+val externalSigningStoreFile = project.findProperty("androidStoreFile")?.toString()
+    ?.let { file(it).canonicalFile }
+val externalSigningStorePassword = project.findProperty("androidStorePassword")?.toString()
+val externalSigningKeyAlias = project.findProperty("androidKeyAlias")?.toString()
+val externalSigningKeyPassword = project.findProperty("androidKeyPassword")?.toString()
+if (configuredSigningProperties != null) {
+    check(externalSigningStoreFile?.isFile == true) {
+        "External signing keystore is missing: $externalSigningStoreFile"
+    }
+    check(externalSigningStorePassword != null && externalSigningKeyAlias != null
+            && externalSigningKeyPassword != null) {
+        "External signing properties must define store/key passwords and key alias."
+    }
+    check(!requireNotNull(externalSigningStoreFile).toPath()
+            .startsWith(rootProject.projectDir.parentFile.canonicalFile.toPath())) {
+        "Signing keystore must be outside the repository."
     }
 }
 
@@ -105,6 +140,18 @@ android {
             enableV3Signing = false
             enableV4Signing = false
         }
+        if (externalSigningStoreFile != null) {
+            create("releaseExternal") {
+                storeFile = externalSigningStoreFile
+                storePassword = requireNotNull(externalSigningStorePassword)
+                keyAlias = requireNotNull(externalSigningKeyAlias)
+                keyPassword = requireNotNull(externalSigningKeyPassword)
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = false
+                enableV4Signing = false
+            }
+        }
     }
 
     defaultConfig {
@@ -150,13 +197,25 @@ android {
     }
 
     buildTypes {
+        val releaseSigning = signingConfigs.findByName("releaseExternal")
+            ?: throw GradleException(
+                "Debug and release builds require -PtrustAttestorSigningProperties "
+                        + "with the external release keystore."
+            )
         debug {
+            // Deliberately use the production certificate for debuggable builds as well. This is
+            // required by the native signer identity gate and prevents debug/release fingerprints
+            // from describing different applications.
+            signingConfig = releaseSigning
+            versionNameSuffix = "/Debug"
             externalNativeBuild.cmake {
                 cFlags += commonLinkerKeepFlags
                 cppFlags += commonLinkerKeepFlags
             }
         }
         release {
+            signingConfig = releaseSigning
+            versionNameSuffix = "/Release"
             isMinifyEnabled = true
             externalNativeBuild.cmake {
                 cFlags += releaseFlags + commonLinkerKeepFlags
@@ -171,12 +230,7 @@ android {
                 // The embedded DEX is consumed by CMake during configuration.
                 // Resolve it from the explicitly supplied external build root so
                 // the native configure step cannot fall back to <module>/build.
-                val externalBuildRoot = providers.gradleProperty("trustAttestorBuildRoot")
-                    .orNull
-                    ?.let(::File)
-                val dexBuildDirectory = externalBuildRoot
-                    ?.resolve("android/dex")
-                    ?: project(":dex").layout.buildDirectory.get().asFile
+                val dexBuildDirectory = externalBuildRoot.resolve("android/dex")
                 val dexFile = if (name == "release") {
                     dexBuildDirectory.resolve(
                         "intermediates/dex/release/minifyReleaseWithR8/classes.dex"
@@ -193,6 +247,7 @@ android {
 
     externalNativeBuild.cmake {
         path("src/main/cpp/CMakeLists.txt")
+        buildStagingDirectory = externalBuildRoot.resolve("native/app")
     }
     packaging {
         jniLibs {
@@ -416,12 +471,6 @@ afterEvaluate {
 
     val debugUnitTest = tasks.named<Test>("testDebugUnitTest")
     val hostRegressionMains = linkedMapOf(
-        "runThroneHuntWatchSnapshotHostTest" to
-            "com.lingqing.trustattestor.ThroneHuntWatchSnapshotTest",
-        "runThroneHuntCompatibilityHostTest" to
-            "com.lingqing.trustattestor.ThroneHuntCompatibilityTest",
-        "runFindingTextCatalogEvidenceHostTest" to
-            "com.lingqing.trustattestor.FindingTextCatalogEvidenceTest",
         "runScanAssessmentWarningHostTest" to
             "com.lingqing.trustattestor.ScanAssessmentWarningTest",
         "runHardwareProbePresentationHostTest" to

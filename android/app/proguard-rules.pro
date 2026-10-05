@@ -18,9 +18,6 @@
 
 -keep class com.lingqing.trustattestor.TrustAttestorNativeBridge { *; }
 -keep class com.lingqing.trustattestor.AppZygoteProbe { *; }
--keep class com.lingqing.trustattestor.ThroneHuntCarrierManager { *; }
--keep class com.lingqing.trustattestor.ThroneHuntStimulus { *; }
--keep class com.lingqing.trustattestor.ThroneHuntWatchSnapshot { *; }
 -keep class com.lingqing.trustattestor.IsolatedAttestationProbe {
     public static int run(android.content.Context);
 }

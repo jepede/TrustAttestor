@@ -1,6 +1,6 @@
 #!/bin/sh
 # Refuse to push generated build output or local signing/configuration files.
-# The build itself is configured to write to D:/LingQing/TrustAttestor-build.
+# The build itself is configured to write to an external build root.
 
 set -eu
 
@@ -44,7 +44,7 @@ while read -r local_ref local_oid remote_ref remote_oid; do
         if [ -n "$bad_paths" ]; then
             if [ "$found" -eq 0 ]; then
                 echo "Push blocked: generated or private files are present in the commits being pushed." >&2
-                echo "Build outside the repository (D:/LingQing/TrustAttestor-build) and remove these paths from the commits:" >&2
+                echo "Build outside the repository and remove these paths from the commits:" >&2
             fi
             found=1
             printf '%s\n' "$bad_paths" >&2

@@ -97,7 +97,17 @@ import javax.security.auth.x500.X500Principal;
 
 public class KeyAttestation {
     public static String TAG = "TrustAttestorLog";
-    private enum ProbeApplicability { APPLICABLE, NOT_APPLICABLE }
+    /**
+     * Outcome of a capability-dependent probe.
+     *
+     * NOT_APPLICABLE is a supported outcome: the platform/API/feature or a required
+     * precondition is absent, so no evidence was expected.  UNAVAILABLE means the probe was
+     * applicable and was attempted, but execution or evidence collection did not complete.
+     * Keeping these states separate prevents an unsupported device from being reported as an
+     * unfinished check and lets the progress wrapper avoid claiming a failed optional probe ran
+     * successfully.
+     */
+    private enum ProbeApplicability { APPLICABLE, NOT_APPLICABLE, UNAVAILABLE }
     private static final String ANDROID_KEY_ATTESTATION_OID = "1.3.6.1.4.1.11129.2.1.17";
     private static final int ATTESTATION_APPLICATION_ID_TAG = 709;
     private static final long FLAG_MAIN_CHAIN_SERVICE = 1L << 0;
@@ -168,6 +178,7 @@ public class KeyAttestation {
     private static final long FLAG_READ_PATH_TIMING = 1L << 59;
     private static final long FLAG_KEY_ID_CONSISTENCY = 1L << 60;
     private static final long FLAG_KEYSTORE_LEDGER = 1L << 61;
+    private static final long FLAG_AIDL_TRAILING_DATA = 1L << 63;
     private static final String PROBE_METADATA_SECURITY_LEVEL =
             "hardware.attestation.metadata_security_level.unavailable";
     private static final String PROBE_BINDER_LOCALITY =
@@ -176,6 +187,8 @@ public class KeyAttestation {
             "hardware.attestation.interface_token_dispatch.unavailable";
     private static final String PROBE_PARAMETER_FINGERPRINT =
             "hardware.attestation.parameter_fingerprint.unavailable";
+    private static final String PROBE_BACKEND_PROVENANCE =
+            "hardware.attestation.backend_provenance.unavailable";
     private static final String PROBE_TEESIM_PARAMETER_FINGERPRINT =
             "hardware.attestation.teesim_parameter_fingerprint.unavailable";
     private static final String PROBE_REPLY_LAG =
@@ -186,8 +199,12 @@ public class KeyAttestation {
             "hardware.attestation.key_id_consistency.unavailable";
     private static final String PROBE_KEYSTORE_LEDGER =
             "hardware.attestation.keystore_ledger.unavailable";
+    private static final String PROBE_AIDL_TRAILING_DATA =
+            "hardware.attestation.aidl_trailing_data.unavailable";
     private static final String PROBE_ATTEST_KEY_DESCRIPTOR_DELEGATION =
             "hardware.attestation.attest_key_descriptor_delegation.unavailable";
+    private static final String PROBE_PRIMARY_ATTESTATION =
+            "hardware.attestation.flow_incomplete";
     // PackageManager.FEATURE_DEVICE_ID_ATTESTATION is hidden through API 35,
     // but the feature-string contract has been stable since ID attestation was added.
     private static final String FEATURE_DEVICE_ID_ATTESTATION =
@@ -228,6 +245,7 @@ public class KeyAttestation {
         if (flag == FLAG_ENTRY_SEMANTICS) return "hardware.attestation.entry_semantics.unavailable";
         if (flag == FLAG_MAIN_BINDING) return "hardware.attestation.main_binding.unavailable";
         if (flag == FLAG_OPERATION_ISOLATION) return "hardware.attestation.operation_isolation.unavailable";
+        if (flag == FLAG_AIDL_TRAILING_DATA) return PROBE_AIDL_TRAILING_DATA;
         return null;
     }
     private static volatile int lastIsolatedChainStatus = 7;
@@ -260,6 +278,9 @@ public class KeyAttestation {
             "MIICBzCCAa2gAwIBAgIUEapMlNL73USuoqfWhn00uiax9XIwCgYIKoZIzj0EAwIwWDELMAkGA1UEBhMCQ04xETAPBgNVBAoMCExpbmdRaW5nMREwDwYDVQQDDAhMaW5nUWluZzEjMCEGCSqGSIb3DQEJARYUbGluZ19xaW5nX2xxQDE2My5jb20wIBcNMjUxMDE4MTIwMjM0WhgPMjEyNTA5MjQxMjAyMzRaMFgxCzAJBgNVBAYTAkNOMREwDwYDVQQKDAhMaW5nUWluZzERMA8GA1UEAwwITGluZ1FpbmcxIzAhBgkqhkiG9w0BCQEWFGxpbmdfcWluZ19scUAxNjMuY29tMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzqASW1XuU+ru4xr7Z+9kJQ+pvd2aCJ7lbKPRDe8TmjdNzmtOdQ8oTxUZ8oqVgBMRBFgQVvpIq14uR3EKuJR70aNTMFEwHQYDVR0OBBYEFCzCEk65Qdpfq8+ZolOsCAaxc61GMB8GA1UdIwQYMBaAFCzCEk65Qdpfq8+ZolOsCAaxc61GMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIgYu1DbBbNmvLLnILOvTR8aCVGZTgeEPn5C/iPdLrKLrACIQC0Fx6wFyFkFmHzWuORq8lDTDrL4MEuisdCA6xGO1TQlg==";
 
     private static volatile Context appContext;
+    // SecureRandom is thread-safe; reuse the provider instance instead of reseeding one for
+    // every temporary key. This changes no challenge format or probe decision.
+    private static final SecureRandom PROBE_RANDOM = new SecureRandom();
     private static volatile long lastProbeFlags;
     private static volatile String[] lastUnavailableProbeIds = new String[0];
     private static final String PREF_NAME = "trust_attestor_shared_data";
@@ -278,6 +299,51 @@ public class KeyAttestation {
     }
     private static final ThreadLocal<Object> ACTIVE_PROGRESS_CALLBACK = new ThreadLocal<>();
     private static final ThreadLocal<Method> ACTIVE_PROGRESS_METHOD = new ThreadLocal<>();
+
+    /**
+     * Snapshot the inexpensive, immutable-for-the-duration-of-a-scan capability gates once.
+     * PackageManager feature queries cross into system_server; keeping them in one snapshot
+     * avoids repeating that IPC in every optional probe while retaining a conservative fallback
+     * when a vendor PackageManager implementation throws.
+     */
+    private static final class ProbeCapabilities {
+        final boolean queryAvailable;
+        final boolean appAttestKey;
+        final boolean strongBox;
+        final boolean deviceIdAttestation;
+
+        private ProbeCapabilities(boolean queryAvailable, boolean appAttestKey,
+                boolean strongBox, boolean deviceIdAttestation) {
+            this.queryAvailable = queryAvailable;
+            this.appAttestKey = appAttestKey;
+            this.strongBox = strongBox;
+            this.deviceIdAttestation = deviceIdAttestation;
+        }
+
+        static ProbeCapabilities capture(Context context) {
+            if (context == null) return new ProbeCapabilities(false, false, false, false);
+            try {
+                PackageManager pm = context.getPackageManager();
+                return new ProbeCapabilities(true,
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                                && pm.hasSystemFeature(PackageManager.FEATURE_KEYSTORE_APP_ATTEST_KEY),
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                                && pm.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE),
+                        pm.hasSystemFeature(FEATURE_DEVICE_ID_ATTESTATION));
+            } catch (Throwable t) {
+                Log.w(TAG, "capability snapshot unavailable", t);
+                return new ProbeCapabilities(false, false, false, false);
+            }
+        }
+    }
+
+    private static final ThreadLocal<ProbeCapabilities> ACTIVE_CAPABILITIES = new ThreadLocal<>();
+
+    private static ProbeCapabilities capabilities(Context context) {
+        ProbeCapabilities snapshot = ACTIVE_CAPABILITIES.get();
+        if (snapshot != null) return snapshot;
+        return ProbeCapabilities.capture(context);
+    }
 
     private static PrivateKey readPrivateKey(String text) throws Exception {
         byte[] bytes = Base64.decode(text, Base64.DEFAULT);
@@ -921,7 +987,10 @@ public class KeyAttestation {
         // detect old tricky store hack leaf mode
         if (useKs2) {
             var chainFromGenerate = ks2GeneratedCertificateChain.get(alias);
-            if (!compareCerts(chainFromGenerate, chainFromService)) {
+            // The primary keys may have been generated through the unwrapped provider path
+            // before the observation hook is installed. In that mode there is no generation
+            // response to compare; a missing observation is unavailable, not a mismatch.
+            if (chainFromGenerate != null && !compareCerts(chainFromGenerate, chainFromService)) {
                 Log.e(TAG, "chain from generateKey and from getKeyEntry not match!");
                 return true;
             }
@@ -940,8 +1009,10 @@ public class KeyAttestation {
         boolean omkExtensionsRun;
         private long currentFlag;
         private String currentUnavailableProbeId;
-        private final List<String> highFindings = new ArrayList<>();
-        private final List<String> diagnosticEntries = new ArrayList<>();
+        // Probe evidence is append-only and order-sensitive, so LinkedHashSet keeps the
+        // established presentation order while avoiding repeated O(n) contains scans.
+        private final LinkedHashSet<String> highFindings = new LinkedHashSet<>();
+        private final LinkedHashSet<String> diagnosticEntries = new LinkedHashSet<>();
         private final LinkedHashSet<String> unavailableProbeIds = new LinkedHashSet<>();
 
         void beginProbe(long flag) {
@@ -966,8 +1037,7 @@ public class KeyAttestation {
             suspicious = true;
             highCount++;
             flags |= flag == 0L ? FLAG_UNKNOWN : flag;
-            if (BuildConfig.DEBUG && text != null && !text.isBlank() && !highFindings.contains(text)) {
-                highFindings.add(text);
+            if (BuildConfig.DEBUG && text != null && !text.isBlank() && highFindings.add(text)) {
                 addDiagnostic("DETECTED", flag, text);
             }
         }
@@ -984,6 +1054,15 @@ public class KeyAttestation {
 
         void normal(long flag, String text) {
             if (BuildConfig.DEBUG) addDiagnostic("VERIFIED", flag, text);
+        }
+
+        /** Record a capability/eligibility decision without creating an unavailable row. */
+        void notApplicable(String text) {
+            notApplicable(currentFlag, text);
+        }
+
+        void notApplicable(long flag, String text) {
+            if (BuildConfig.DEBUG) addDiagnostic("INFO", flag, text);
         }
 
         void warn(String text) {
@@ -1023,12 +1102,8 @@ public class KeyAttestation {
             activeForgeryProbesRun |= other.activeForgeryProbesRun;
             timingSuiteRun |= other.timingSuiteRun;
             omkExtensionsRun |= other.omkExtensionsRun;
-            for (String finding : other.highFindings) {
-                if (!highFindings.contains(finding)) highFindings.add(finding);
-            }
-            for (String entry : other.diagnosticEntries) {
-                if (!diagnosticEntries.contains(entry)) diagnosticEntries.add(entry);
-            }
+            highFindings.addAll(other.highFindings);
+            diagnosticEntries.addAll(other.diagnosticEntries);
             unavailableProbeIds.addAll(other.unavailableProbeIds);
         }
 
@@ -1042,7 +1117,7 @@ public class KeyAttestation {
             String entry = "[" + status + "] {flag=0x"
                     + Long.toHexString(normalizedFlag).toUpperCase(java.util.Locale.US)
                     + "} " + text;
-            if (!diagnosticEntries.contains(entry)) diagnosticEntries.add(entry);
+            diagnosticEntries.add(entry);
         }
 
         String flagHex() {
@@ -1052,11 +1127,42 @@ public class KeyAttestation {
         String[] unavailableProbeIds() {
             return unavailableProbeIds.toArray(new String[0]);
         }
+
+        /**
+         * A primary attestation failure is a capability result, not evidence of tampering.
+         * Discard any partial findings collected before the failure so the caller publishes only
+         * UNAVAILABLE and never starts the active probe suite for an incomplete primary flow.
+         */
+        void resetToPrimaryUnavailable(String detail) {
+            suspicious = false;
+            highCount = 0;
+            warnCount = 0;
+            flags = 0L;
+            activeForgeryProbesRun = false;
+            timingSuiteRun = false;
+            omkExtensionsRun = false;
+            currentFlag = 0L;
+            currentUnavailableProbeId = null;
+            highFindings.clear();
+            diagnosticEntries.clear();
+            unavailableProbeIds.clear();
+            unavailable(0L, PROBE_PRIMARY_ATTESTATION, detail);
+        }
+    }
+
+    private static int returnPrimaryAttestationUnavailable(
+            ActiveProbeResult result,
+            String detail
+    ) {
+        result.resetToPrimaryUnavailable(detail);
+        updateKeyAttestationDetail("Key Attestation：主 Attestation 不可用，已停止主动探针\n"
+                + detail);
+        return 2;
     }
 
     private static byte[] makeProbeChallenge(String tag) {
         byte[] rnd = new byte[16];
-        new SecureRandom().nextBytes(rnd);
+        PROBE_RANDOM.nextBytes(rnd);
         return ("TrustAttestor:" + tag + ":" + System.nanoTime() + ":" +
                 BaseEncoding.base16().encode(rnd)).getBytes(StandardCharsets.UTF_8);
     }
@@ -1092,21 +1198,7 @@ public class KeyAttestation {
     }
 
     private static SilentKeystoreChecks.Reporter silentReporter(ActiveProbeResult result, long flag) {
-        return (check, status, detail) -> {
-            if (Thread.currentThread().isInterrupted()) {
-                status = SilentProbeEvidence.Status.UNAVAILABLE;
-                detail = "检测已中断";
-            }
-            String evidence = "[" + check + "] " + detail;
-            if (status == SilentProbeEvidence.Status.DETECTED) {
-                result.high(flag, evidence);
-            } else if (status == SilentProbeEvidence.Status.UNAVAILABLE) {
-                String unavailableProbeId = unavailableProbeIdForFlag(flag);
-                result.unavailable(flag, unavailableProbeId, evidence);
-            } else {
-                result.normal(flag, evidence);
-            }
-        };
+        return createReporter(result, flag, unavailableProbeIdForFlag(flag), false, null, null);
     }
 
     private static SilentKeystoreChecks.Reporter namedSilentReporter(
@@ -1114,21 +1206,84 @@ public class KeyAttestation {
             long flag,
             String unavailableProbeId
     ) {
+        return createReporter(result, flag, unavailableProbeId, true, null, null);
+    }
+
+    private static SilentKeystoreChecks.Reporter namedSilentReporter(
+            ActiveProbeResult result,
+            long flag,
+            String unavailableProbeId,
+            String secondaryCheck,
+            String secondaryUnavailableProbeId
+    ) {
+        return createReporter(result, flag, unavailableProbeId, true,
+                secondaryCheck, secondaryUnavailableProbeId);
+    }
+
+    private static SilentKeystoreChecks.Reporter createReporter(
+            ActiveProbeResult result,
+            long flag,
+            String unavailableProbeId,
+            boolean logUnavailable,
+            String secondaryCheck,
+            String secondaryUnavailableProbeId
+    ) {
         return (check, status, detail) -> {
             if (Thread.currentThread().isInterrupted()) {
                 status = SilentProbeEvidence.Status.UNAVAILABLE;
                 detail = "检测已中断";
             }
             String evidence = "[" + check + "] " + detail;
+            String effectiveUnavailableProbeId = secondaryCheck != null
+                    && secondaryCheck.equals(check)
+                    && secondaryUnavailableProbeId != null
+                    ? secondaryUnavailableProbeId : unavailableProbeId;
             if (status == SilentProbeEvidence.Status.DETECTED) {
                 result.high(flag, evidence);
+            } else if (status == SilentProbeEvidence.Status.WARNING) {
+                result.warn(flag, evidence);
             } else if (status == SilentProbeEvidence.Status.UNAVAILABLE) {
-                result.unavailable(flag, unavailableProbeId, evidence);
-                Log.w(TAG, unavailableProbeId + ": " + detail);
+                result.unavailable(flag, effectiveUnavailableProbeId, evidence);
+                if (logUnavailable) Log.w(TAG, effectiveUnavailableProbeId + ": " + detail);
             } else {
                 result.normal(flag, evidence);
             }
         };
+    }
+
+    /**
+     * Applies the common status/diagnostic policy used by structural, timing and state-plane
+     * probes. The adapters below only extract their result-specific fields, keeping the verdict
+     * mapping in one place.
+     */
+    private static void applyProbeObservation(
+            ActiveProbeResult result,
+            long flag,
+            String unavailableProbeId,
+            SilentProbeEvidence.Status status,
+            String displayDetail,
+            String summary,
+            String unavailableDetail,
+            Throwable failure,
+            String nullResultDetail
+    ) {
+        if (status == null) {
+            result.unavailable(unavailableProbeId, nullResultDetail);
+            Log.w(TAG, unavailableProbeId + ": " + nullResultDetail);
+            return;
+        }
+        if (status == SilentProbeEvidence.Status.DETECTED) {
+            result.high(flag, displayDetail);
+        } else if (status == SilentProbeEvidence.Status.WARNING) {
+            result.warn(flag, displayDetail);
+        } else if (status == SilentProbeEvidence.Status.UNAVAILABLE) {
+            result.unavailable(unavailableProbeId, displayDetail);
+            String logDetail = failure != null ? summary : unavailableDetail;
+            if (failure != null) Log.w(TAG, unavailableProbeId + ": " + logDetail, failure);
+            else Log.w(TAG, unavailableProbeId + ": " + logDetail);
+        } else {
+            result.normal(displayDetail);
+        }
     }
 
     private static void applyStructuralProbeResult(
@@ -1137,24 +1292,21 @@ public class KeyAttestation {
             String unavailableProbeId,
             StructuralKeystoreProbes.Result observation
     ) {
-        if (observation == null) {
-            result.unavailable(unavailableProbeId, "结构探针未返回结果");
-            Log.w(TAG, unavailableProbeId + ": null result");
-            return;
+        if (observation != null && "B.binder_locality".equals(observation.id)) {
+            // Keep the four leg dispositions visible in logcat. A VERIFIED locality result is
+            // intentionally not a finding, but its remote/local split is needed to diagnose an
+            // OMK configuration that routes only selected service methods.
+            Log.i(TAG, "binder-locality result="
+                    + (BuildConfig.DEBUG ? observation.debugDetail()
+                    : observation.summary + "; " + observation.detail));
         }
-        String detail = BuildConfig.DEBUG ? observation.debugDetail() : observation.summary;
-        if (observation.status == SilentProbeEvidence.Status.DETECTED) {
-            result.high(flag, detail);
-        } else if (observation.status == SilentProbeEvidence.Status.UNAVAILABLE) {
-            result.unavailable(unavailableProbeId, detail);
-            if (observation.failure != null) {
-                Log.w(TAG, unavailableProbeId + ": " + observation.summary, observation.failure);
-            } else {
-                Log.w(TAG, unavailableProbeId + ": " + observation.detail);
-            }
-        } else {
-            result.normal(detail);
-        }
+        applyProbeObservation(result, flag, unavailableProbeId,
+                observation == null ? null : observation.status,
+                observation == null ? null : (BuildConfig.DEBUG ? observation.debugDetail() : observation.summary),
+                observation == null ? null : observation.summary,
+                observation == null ? null : observation.detail,
+                observation == null ? null : observation.failure,
+                "结构探针未返回结果");
     }
 
     private static void applyTimingProbeResult(
@@ -1163,24 +1315,13 @@ public class KeyAttestation {
             String unavailableProbeId,
             OmkTimingProbes.Result observation
     ) {
-        if (observation == null) {
-            result.unavailable(unavailableProbeId, "时序探针未返回结果");
-            Log.w(TAG, unavailableProbeId + ": null result");
-            return;
-        }
-        String detail = BuildConfig.DEBUG ? observation.debugDetail() : observation.summary;
-        if (observation.status == SilentProbeEvidence.Status.DETECTED) {
-            result.high(flag, detail);
-        } else if (observation.status == SilentProbeEvidence.Status.UNAVAILABLE) {
-            result.unavailable(unavailableProbeId, detail);
-            if (observation.failure != null) {
-                Log.w(TAG, unavailableProbeId + ": " + observation.summary, observation.failure);
-            } else {
-                Log.w(TAG, unavailableProbeId + ": " + observation.detail);
-            }
-        } else {
-            result.normal(detail);
-        }
+        applyProbeObservation(result, flag, unavailableProbeId,
+                observation == null ? null : observation.status,
+                observation == null ? null : (BuildConfig.DEBUG ? observation.debugDetail() : observation.summary),
+                observation == null ? null : observation.summary,
+                observation == null ? null : observation.detail,
+                observation == null ? null : observation.failure,
+                "时序探针未返回结果");
     }
 
     private static void applyStatePlaneProbeResult(
@@ -1189,24 +1330,13 @@ public class KeyAttestation {
             String unavailableProbeId,
             KeystoreStatePlaneProbes.Result observation
     ) {
-        if (observation == null) {
-            result.unavailable(unavailableProbeId, "Keystore 状态平面探针未返回结果");
-            Log.w(TAG, unavailableProbeId + ": null result");
-            return;
-        }
-        String detail = BuildConfig.DEBUG ? observation.debugDetail() : observation.summary;
-        if (observation.status == SilentProbeEvidence.Status.DETECTED) {
-            result.high(flag, detail);
-        } else if (observation.status == SilentProbeEvidence.Status.UNAVAILABLE) {
-            result.unavailable(unavailableProbeId, detail);
-            if (observation.failure != null) {
-                Log.w(TAG, unavailableProbeId + ": " + observation.summary, observation.failure);
-            } else {
-                Log.w(TAG, unavailableProbeId + ": " + observation.detail);
-            }
-        } else {
-            result.normal(detail);
-        }
+        applyProbeObservation(result, flag, unavailableProbeId,
+                observation == null ? null : observation.status,
+                observation == null ? null : (BuildConfig.DEBUG ? observation.debugDetail() : observation.summary),
+                observation == null ? null : observation.summary,
+                observation == null ? null : observation.detail,
+                observation == null ? null : observation.failure,
+                "Keystore 状态平面探针未返回结果");
     }
 
     private static void runUserAuthBypassProbe(Context context, ActiveProbeResult result) {
@@ -1222,7 +1352,7 @@ public class KeyAttestation {
     ) {
         final String permission = "android.permission.REQUEST_UNIQUE_ID_ATTESTATION";
         if (context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
-            result.skipped("应用具有 Unique-ID attestation 权限，无法建立无权限负对照");
+            result.notApplicable("应用具有 Unique-ID attestation 权限，无法建立无权限负对照");
             return;
         }
 
@@ -1245,7 +1375,7 @@ public class KeyAttestation {
                             .setDigests(KeyProperties.DIGEST_SHA256)
                             .setAttestationChallenge(makeProbeChallenge("uniqueid"));
                     if (!requestUniqueIdAttestation(builder)) {
-                        result.skipped("当前平台未暴露 Unique-ID attestation 请求接口");
+                        result.notApplicable("当前平台未暴露 Unique-ID attestation 请求接口");
                         return;
                     }
                     applyProbeAttestKeyIfAvailable(builder);
@@ -1266,7 +1396,7 @@ public class KeyAttestation {
                     Attestation attestation = Attestation.loadFromCertificate(leaf);
                     byte[] uniqueId = attestation.getUniqueId();
                     if (uniqueId != null && uniqueId.length != 0) {
-                        result.skipped("Unique-ID 请求成功但证明记录包含非空 Unique ID");
+                        result.warn("Unique-ID 请求成功但证明记录包含非空 Unique ID；当前权限/厂商策略不允许建立无权限负对照");
                         return;
                     }
                     ++strippedResponses;
@@ -1803,9 +1933,10 @@ public class KeyAttestation {
     }
 
     private static void runKeystoreTimingSideChannelProbe(ActiveProbeResult result) {
-        lastTimingProbeStatus = 2;
+        // 3 means not run/not applicable; 2 is reserved for an applicable probe that failed.
+        lastTimingProbeStatus = 3;
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            result.skipped("Keystore 时序竞争检测需要 Android 12+ API");
+            result.notApplicable("Keystore 时序竞争检测需要 Android 12+ API");
             return;
         }
 
@@ -2030,10 +2161,6 @@ public class KeyAttestation {
         }
     }
 
-    private static void runFlaggedProbe(ActiveProbeResult result, long flag, Runnable probe) {
-        runFlaggedProbe(result, flag, null, probe);
-    }
-
     private static void runFlaggedProbe(
             ActiveProbeResult result,
             long flag,
@@ -2057,20 +2184,6 @@ public class KeyAttestation {
         }
     }
 
-    private static void runProgressProbe(
-            ActiveProbeResult result,
-            long flag,
-            int permille,
-            String progress,
-            Runnable probe
-    ) {
-        postProgress(permille, progress);
-        long startedAt = SystemClock.elapsedRealtime();
-        runFlaggedProbe(result, flag, probe);
-        Log.i(TAG, progress + " completed in "
-                + (SystemClock.elapsedRealtime() - startedAt) + " ms");
-    }
-
     /**
      * Runs a capability-dependent probe without counting an unsupported check as passed. The
      * generic progress event keeps the scan moving while only an applicable probe publishes its
@@ -2092,7 +2205,8 @@ public class KeyAttestation {
         } catch (Throwable unavailable) {
             String detail = "子检测未完成：" + unavailable.getClass().getSimpleName()
                     + (unavailable.getMessage() == null ? "" : ": " + unavailable.getMessage());
-            result.skipped(detail);
+            result.unavailable(unavailableProbeIdForFlag(flag), detail);
+            applicability = ProbeApplicability.UNAVAILABLE;
             Log.w(TAG, "optional active probe unavailable", unavailable);
         } finally {
             result.endProbe();
@@ -2101,7 +2215,10 @@ public class KeyAttestation {
             postProgress(permille, progress);
         }
         Log.i(TAG, progress + (applicability == ProbeApplicability.APPLICABLE
-                ? " completed in " : " not applicable; evaluated in ")
+                ? " completed in "
+                : applicability == ProbeApplicability.NOT_APPLICABLE
+                ? " not applicable; evaluated in "
+                : " unavailable after ")
                 + (SystemClock.elapsedRealtime() - startedAt) + " ms");
     }
 
@@ -2118,6 +2235,75 @@ public class KeyAttestation {
         runFlaggedProbe(result, flag, unavailableProbeId, probe);
         Log.i(TAG, progress + " completed in "
                 + (SystemClock.elapsedRealtime() - startedAt) + " ms");
+    }
+
+    /**
+     * Declarative description of one hardware probe.
+     *
+     * The old implementation repeated the same progress/failure/timing wrapper at every call
+     * site. Keeping the operation itself as a lambda preserves the exact order and evidence
+     * handling while making the pipeline metadata easy to audit in one place.
+     */
+    private static final class ProbeStep {
+        final long flag;
+        final String unavailableProbeId;
+        final int permille;
+        final String progress;
+        final boolean optional;
+        final Supplier<ProbeApplicability> operation;
+
+        private ProbeStep(
+                long flag,
+                String unavailableProbeId,
+                int permille,
+                String progress,
+                boolean optional,
+                Supplier<ProbeApplicability> operation
+        ) {
+            this.flag = flag;
+            this.unavailableProbeId = unavailableProbeId;
+            this.permille = permille;
+            this.progress = progress;
+            this.optional = optional;
+            this.operation = operation;
+        }
+
+        static ProbeStep required(
+                long flag,
+                String unavailableProbeId,
+                int permille,
+                String progress,
+                Runnable operation
+        ) {
+            return new ProbeStep(flag, unavailableProbeId, permille, progress, false, () -> {
+                operation.run();
+                return ProbeApplicability.APPLICABLE;
+            });
+        }
+
+        static ProbeStep optional(
+                long flag,
+                int permille,
+                String progress,
+                Supplier<ProbeApplicability> operation
+        ) {
+            return new ProbeStep(flag, null, permille, progress, true, operation);
+        }
+
+        void run(ActiveProbeResult result) {
+            if (optional) {
+                runOptionalProgressProbe(result, flag, permille, progress, operation);
+            } else {
+                runProgressProbe(result, flag, unavailableProbeId, permille, progress,
+                        () -> operation.get());
+            }
+        }
+    }
+
+    private static void runProbeSteps(ActiveProbeResult result, ProbeStep... steps) {
+        for (ProbeStep step : steps) {
+            step.run(result);
+        }
     }
 
     private static SilentKeystoreChecks.Reporter certificateRecordReporter(
@@ -2143,22 +2329,29 @@ public class KeyAttestation {
         try {
             if (context == null) {
                 result.skipped("隔离证明链检测缺少应用上下文");
-                return ProbeApplicability.APPLICABLE;
+                return ProbeApplicability.UNAVAILABLE;
             }
             Class<?> bridge = context.getClassLoader().loadClass(
                     "com.lingqing.trustattestor.IsolatedAttestationProbe");
             Object returned = bridge.getMethod("run", Context.class).invoke(null, context);
             if (!(returned instanceof Integer status) || status < 0 || status > 7) {
                 result.skipped("隔离证明链检测结果不完整");
-                return ProbeApplicability.APPLICABLE;
+                return ProbeApplicability.UNAVAILABLE;
             }
             lastIsolatedChainStatus = status;
             if (status == 1) result.high(FLAG_ISOLATED_CHAIN, "同一临时证明密钥在主进程与隔离 UID 下返回不同证书链");
             else if (status == 0) result.normal("隔离 UID 授权证明链与主进程稳定快照一致");
-            else if (status == 2) return ProbeApplicability.NOT_APPLICABLE;
-            else result.skipped("隔离证明链检测不可用，状态=" + status);
+            else if (status == 2) {
+                result.notApplicable("当前设备/系统不支持隔离证明链授权，本项不适用");
+                return ProbeApplicability.NOT_APPLICABLE;
+            }
+            else {
+                result.skipped("隔离证明链检测不可用，状态=" + status);
+                return ProbeApplicability.UNAVAILABLE;
+            }
         } catch (Throwable unavailable) {
             result.skipped("隔离证明链检测接口不可用：" + unavailable.getClass().getSimpleName());
+            return ProbeApplicability.UNAVAILABLE;
         }
         return ProbeApplicability.APPLICABLE;
     }
@@ -2166,45 +2359,86 @@ public class KeyAttestation {
     private static void runActiveForgeryProbes(Context context, String targetAlias, Certificate[] targetChain, Certificate[] mainAliasChain, Certificate[] attestKeyChain, AttestationResult attestationResult, ActiveProbeResult result) {
         if (result.activeForgeryProbesRun) return;
         // Set before executing the first child so an unexpected outer failure can never replay
-        // stateful probes against the same aliases. Every child has its own failure boundary.
+        // stateful probes against the same aliases. This method is reached only after the primary
+        // attestation flow has produced usable evidence.
         result.activeForgeryProbesRun = true;
 
         runOmkTimingSuiteOnce(result);
 
         // Fast path: keep the independent, low-cost checks that cover the
         // certificate, authorization and operation surfaces on every scan.
-        runOptionalProgressProbe(result, FLAG_ATTEST_CROSS_SIGN, 510,
-                "progress.hardware.probe.attest_cross_sign",
-                () -> runAttestKeyCrossSigningProbe(mainAliasChain, attestKeyChain, result));
-        runProgressProbe(result, FLAG_CHALLENGE_REPLAY, 540, "progress.hardware.probe.challenge_replay", () -> runChallengeReplayProbe(result));
-        runProgressProbe(result, FLAG_NULL_CHALLENGE, 565, "progress.hardware.probe.null_challenge", () -> runNullChallengeNegativeProbe(result));
-        runProgressProbe(result, FLAG_CTS_LEAF, 590, "progress.hardware.probe.leaf_profile", () -> runCtsLeafProfileProbe(targetChain, result));
-        runProgressProbe(result, FLAG_APP_ID, 610, "progress.hardware.probe.application_id", () -> runAttestationApplicationIdProbe(context, targetChain, result));
-        runOptionalProgressProbe(result, FLAG_SIGNING_LINEAGE, 625, "progress.hardware.probe.signing_lineage", () -> runSigningLineageProbe(context, targetChain, result));
-        runProgressProbe(result, FLAG_METADATA_AUTH, 645, "progress.hardware.probe.metadata_auth", () -> runKeyMetadataAuthorizationProbe(targetAlias, attestationResult, result));
-        runProgressProbe(result, FLAG_IMPORT_KEY, 670, "progress.hardware.probe.import_key", () -> runImportKeyProbe(result));
-        runProgressProbe(result, FLAG_PATCH_LEVEL, 695, "progress.hardware.probe.patch_level", () -> runPatchLevelConsistencyProbe(attestationResult, result));
-        runOptionalProgressProbe(result, FLAG_DEVICE_PROPERTIES, 715,
-                "progress.hardware.probe.device_properties",
-                () -> runDevicePropertiesProbe(context, result));
-        runProgressProbe(result, FLAG_USER_AUTH, 760, "progress.hardware.probe.user_auth", () -> runUserAuthBypassProbe(context, result));
-        runOptionalProgressProbe(result, FLAG_SINGLE_USE, 780, "progress.hardware.probe.single_use", () -> runSingleUseProbe(context, result));
-        runProgressProbe(result, FLAG_FUTURE_VALIDITY, 800, "progress.hardware.probe.validity", () -> runFutureValidityProbe(result));
-        runProgressProbe(result, FLAG_UNIQUE_ID_BYPASS, 820, "progress.hardware.probe.unique_id", () -> runUniqueIdPermissionBypassProbe(context, result));
-        runOptionalProgressProbe(result, FLAG_STRONGBOX_DIFFERENTIAL, 840, "progress.hardware.probe.strongbox", () -> runStrongBoxDifferentialProbe(context, result));
-        runProgressProbe(result, FLAG_KEYMINT_BOUNDARY, 860, "progress.hardware.probe.keymint_boundary", () -> runKeyMintBoundaryProbe(result));
-        runProgressProbe(result, FLAG_OPERATION_SEMANTICS, 880, "progress.hardware.probe.operation_auth", () -> runOperationAuthorizationProbe(result));
-
-        // The selected silent lifecycle check runs even when earlier probes were normal.
-        runProgressProbe(result, FLAG_KEYSTORE_STATE, 890, "progress.hardware.probe.keystore_state", () -> runKeystoreStateMachineProbe(result));
-        runProgressProbe(result, FLAG_RSA_CONFORMANCE, 891, "progress.hardware.probe.extended_crypto", () -> runExtendedCryptoProbe(result));
-        runProgressProbe(result, FLAG_ENTRY_SEMANTICS, 892, "progress.hardware.probe.entry_semantics",
-                () -> SilentKeystoreChecks.entrySemantics(silentReporter(result, FLAG_ENTRY_SEMANTICS)));
-        runProgressProbe(result, FLAG_OPERATION_ISOLATION, 893, "progress.hardware.probe.operation_isolation",
-                () -> SilentKeystoreChecks.operationIsolation(silentReporter(result, FLAG_OPERATION_ISOLATION)));
-        runProgressProbe(result, FLAG_CHAIN_READ_STABILITY, 894, "progress.hardware.probe.certificate_record",
-                () -> CertificateRecordChecks.run(certificateRecordReporter(result, false),
-                        certificateRecordReporter(result, true)));
+        runProbeSteps(result,
+                ProbeStep.optional(FLAG_ATTEST_CROSS_SIGN, 510,
+                        "progress.hardware.probe.attest_cross_sign",
+                        () -> runAttestKeyCrossSigningProbe(mainAliasChain, attestKeyChain, result)),
+                ProbeStep.required(FLAG_CHALLENGE_REPLAY, null, 540,
+                        "progress.hardware.probe.challenge_replay",
+                        () -> runChallengeReplayProbe(result)),
+                ProbeStep.required(FLAG_NULL_CHALLENGE, null, 565,
+                        "progress.hardware.probe.null_challenge",
+                        () -> runNullChallengeNegativeProbe(result)),
+                ProbeStep.required(FLAG_CTS_LEAF, null, 590,
+                        "progress.hardware.probe.leaf_profile",
+                        () -> runCtsLeafProfileProbe(targetChain, result)),
+                ProbeStep.required(FLAG_APP_ID, null, 610,
+                        "progress.hardware.probe.application_id",
+                        () -> runAttestationApplicationIdProbe(context, targetChain, result)),
+                ProbeStep.optional(FLAG_SIGNING_LINEAGE, 625,
+                        "progress.hardware.probe.signing_lineage",
+                        () -> runSigningLineageProbe(context, targetChain, result)),
+                ProbeStep.required(FLAG_METADATA_AUTH, null, 645,
+                        "progress.hardware.probe.metadata_auth",
+                        () -> runKeyMetadataAuthorizationProbe(targetAlias, attestationResult, result)),
+                ProbeStep.required(FLAG_IMPORT_KEY, null, 670,
+                        "progress.hardware.probe.import_key",
+                        () -> runImportKeyProbe(result)),
+                ProbeStep.required(FLAG_PATCH_LEVEL, null, 695,
+                        "progress.hardware.probe.patch_level",
+                        () -> runPatchLevelConsistencyProbe(attestationResult, result)),
+                ProbeStep.optional(FLAG_DEVICE_PROPERTIES, 715,
+                        "progress.hardware.probe.device_properties",
+                        () -> runDevicePropertiesProbe(context, result)),
+                ProbeStep.required(FLAG_USER_AUTH, null, 760,
+                        "progress.hardware.probe.user_auth",
+                        () -> runUserAuthBypassProbe(context, result)),
+                ProbeStep.optional(FLAG_SINGLE_USE, 780,
+                        "progress.hardware.probe.single_use",
+                        () -> runSingleUseProbe(context, result)),
+                ProbeStep.required(FLAG_FUTURE_VALIDITY, null, 800,
+                        "progress.hardware.probe.validity",
+                        () -> runFutureValidityProbe(result)),
+                ProbeStep.required(FLAG_UNIQUE_ID_BYPASS, null, 820,
+                        "progress.hardware.probe.unique_id",
+                        () -> runUniqueIdPermissionBypassProbe(context, result)),
+                ProbeStep.optional(FLAG_STRONGBOX_DIFFERENTIAL, 840,
+                        "progress.hardware.probe.strongbox",
+                        () -> runStrongBoxDifferentialProbe(context, result)),
+                ProbeStep.required(FLAG_KEYMINT_BOUNDARY, null, 860,
+                        "progress.hardware.probe.keymint_boundary",
+                        () -> runKeyMintBoundaryProbe(result)),
+                ProbeStep.required(FLAG_OPERATION_SEMANTICS, null, 880,
+                        "progress.hardware.probe.operation_auth",
+                        () -> runOperationAuthorizationProbe(result)),
+                // The selected silent lifecycle checks run even when earlier probes were normal.
+                ProbeStep.required(FLAG_KEYSTORE_STATE, null, 890,
+                        "progress.hardware.probe.keystore_state",
+                        () -> runKeystoreStateMachineProbe(result)),
+                ProbeStep.required(FLAG_RSA_CONFORMANCE, null, 891,
+                        "progress.hardware.probe.extended_crypto",
+                        () -> runExtendedCryptoProbe(result)),
+                ProbeStep.required(FLAG_ENTRY_SEMANTICS, null, 892,
+                        "progress.hardware.probe.entry_semantics",
+                        () -> SilentKeystoreChecks.entrySemantics(
+                                silentReporter(result, FLAG_ENTRY_SEMANTICS))),
+                ProbeStep.required(FLAG_OPERATION_ISOLATION, null, 893,
+                        "progress.hardware.probe.operation_isolation",
+                        () -> SilentKeystoreChecks.operationIsolation(
+                                silentReporter(result, FLAG_OPERATION_ISOLATION))),
+                ProbeStep.required(FLAG_CHAIN_READ_STABILITY, null, 894,
+                        "progress.hardware.probe.certificate_record",
+                        () -> CertificateRecordChecks.run(
+                                certificateRecordReporter(result, false),
+                                certificateRecordReporter(result, true))));
         // Multi-key graphs and the RSA differential are confirmation probes.
         // They account for most of the extra TEE key generations on slow vendor
         // KeyMint implementations. Both build types execute them only after the
@@ -2219,15 +2453,27 @@ public class KeyAttestation {
         Log.i(TAG, "KeyMint active-probe path: "
                 + (runDeepConfirmation ? "deep-confirmation" : "fast"));
         if (runDeepConfirmation) {
-            runProgressProbe(result, FLAG_ATTEST_GRAPH, 900, "progress.hardware.probe.attest_graph", () -> runMultiLayerAttestKeyGraphProbe(result));
-            runProgressProbe(result, FLAG_ATTEST_TRAP, 905, "progress.hardware.probe.attest_trap", () -> runAttestKeyTrapProbe(context, result));
-            runProgressProbe(result, FLAG_ALIAS_CROSSTALK, 910, "progress.hardware.probe.alias_isolation", () -> runMultiAliasCrosstalkProbe(result));
-            runProgressProbe(result, FLAG_ATTEST_NEGATIVE, 915, "progress.hardware.probe.attest_negative", () -> runAttestKeyNegativeControlProbe(result));
-            runProgressProbe(result, FLAG_ALGORITHM_DIFFERENTIAL, 920, "progress.hardware.probe.algorithm", () -> runAlgorithmDifferentialProbe(attestationResult, result));
+            runProbeSteps(result,
+                    ProbeStep.required(FLAG_ATTEST_GRAPH, null, 900,
+                            "progress.hardware.probe.attest_graph",
+                            () -> runMultiLayerAttestKeyGraphProbe(result)),
+                    ProbeStep.required(FLAG_ATTEST_TRAP, null, 905,
+                            "progress.hardware.probe.attest_trap",
+                            () -> runAttestKeyTrapProbe(context, result)),
+                    ProbeStep.required(FLAG_ALIAS_CROSSTALK, null, 910,
+                            "progress.hardware.probe.alias_isolation",
+                            () -> runMultiAliasCrosstalkProbe(result)),
+                    ProbeStep.required(FLAG_ATTEST_NEGATIVE, null, 915,
+                            "progress.hardware.probe.attest_negative",
+                            () -> runAttestKeyNegativeControlProbe(result)),
+                    ProbeStep.required(FLAG_ALGORITHM_DIFFERENTIAL, null, 920,
+                            "progress.hardware.probe.algorithm",
+                            () -> runAlgorithmDifferentialProbe(attestationResult, result)));
         }
         // Start the new process/key-sharing workload after the independent timing sample.
-        runOptionalProgressProbe(result, FLAG_ISOLATED_CHAIN, 945, "progress.hardware.probe.isolated_chain",
-                () -> runIsolatedChainProbe(context, result));
+        runProbeSteps(result, ProbeStep.optional(FLAG_ISOLATED_CHAIN, 945,
+                "progress.hardware.probe.isolated_chain",
+                () -> runIsolatedChainProbe(context, result)));
 
         runOmkExtensionProbesOnce(context, targetAlias, result);
     }
@@ -2241,22 +2487,24 @@ public class KeyAttestation {
         if (result.timingSuiteRun) return;
         result.timingSuiteRun = true;
 
-        runProgressProbe(result, FLAG_REPLY_LAG, PROBE_REPLY_LAG, 501,
-                "progress.hardware.probe.reply_lag",
-                () -> applyTimingProbeResult(result, FLAG_REPLY_LAG, PROBE_REPLY_LAG,
-                        OmkTimingProbes.runReplyLag()));
-        runProgressProbe(result, FLAG_READ_PATH_TIMING, PROBE_READ_PATH_TIMING, 504,
-                "progress.hardware.probe.read_path_timing",
-                () -> applyTimingProbeResult(result, FLAG_READ_PATH_TIMING,
-                        PROBE_READ_PATH_TIMING, OmkTimingProbes.runReadPathTiming()));
-        runProgressProbe(result, FLAG_TIMING_SIDE_CHANNEL, 507,
-                "progress.hardware.probe.timing", () -> runKeystoreTimingSideChannelProbe(result));
+        runProbeSteps(result,
+                ProbeStep.required(FLAG_REPLY_LAG, PROBE_REPLY_LAG, 501,
+                        "progress.hardware.probe.reply_lag",
+                        () -> applyTimingProbeResult(result, FLAG_REPLY_LAG, PROBE_REPLY_LAG,
+                                OmkTimingProbes.runReplyLag())),
+                ProbeStep.required(FLAG_READ_PATH_TIMING, PROBE_READ_PATH_TIMING, 504,
+                        "progress.hardware.probe.read_path_timing",
+                        () -> applyTimingProbeResult(result, FLAG_READ_PATH_TIMING,
+                                PROBE_READ_PATH_TIMING, OmkTimingProbes.runReadPathTiming())),
+                ProbeStep.required(FLAG_TIMING_SIDE_CHANNEL, null, 507,
+                        "progress.hardware.probe.timing",
+                        () -> runKeystoreTimingSideChannelProbe(result)));
     }
 
     /**
-     * Runs every new OMK-derived check exactly once, including when the primary certificate path
-     * exits early. The risky private-protocol families remain last and each family owns its own
-     * timeout and health guards.
+     * Runs every new OMK-derived check exactly once after the primary certificate path succeeds.
+     * The risky private-protocol families remain last and each family owns its own timeout and
+     * health guards.
      */
     private static ProbeApplicability runAttestKeyDescriptorDelegationProbe(
             Context context,
@@ -2267,15 +2515,27 @@ public class KeyAttestation {
         }
         if (context == null) {
             result.skipped("AttestKey KeyDescriptor 直接委派检测缺少应用上下文");
-            return ProbeApplicability.APPLICABLE;
+            return ProbeApplicability.UNAVAILABLE;
         }
-        boolean featureDeclared = context.getPackageManager().hasSystemFeature(
-                OmkAttestKeyProbeSpec.FEATURE_KEYSTORE_APP_ATTEST_KEY);
+        ProbeCapabilities capabilitySnapshot = capabilities(context);
+        if (!capabilitySnapshot.queryAvailable) {
+            result.unavailable(PROBE_ATTEST_KEY_DESCRIPTOR_DELEGATION,
+                    "App AttestKey 能力查询未完成");
+            return ProbeApplicability.UNAVAILABLE;
+        }
+        boolean featureDeclared = capabilitySnapshot.appAttestKey;
         if (!OmkAttestKeyProbeSpec.shouldRun(Build.VERSION.SDK_INT, featureDeclared)) {
             if (BuildConfig.DEBUG) {
                 Log.d(TAG, "AttestKey descriptor delegation not applicable: "
                         + "FEATURE_KEYSTORE_APP_ATTEST_KEY is not declared");
             }
+            return ProbeApplicability.NOT_APPLICABLE;
+        }
+        // The capability mismatch is already reported by the primary request path when the
+        // declared App AttestKey could not be generated. Do not run this alias-dependent
+        // follow-up with a missing key and turn the same bit into a spurious UNAVAILABLE row.
+        if (!attestAliasReady) {
+            result.normal("App AttestKey 能力已声明，但本轮没有可用的 AttestKey 别名，跳过委派后续探针");
             return ProbeApplicability.NOT_APPLICABLE;
         }
         OmkRiskyProbes.runAttestKeyDescriptorDelegation(namedSilentReporter(result,
@@ -2292,48 +2552,55 @@ public class KeyAttestation {
         if (result.omkExtensionsRun) return;
         result.omkExtensionsRun = true;
 
-        runProgressProbe(result, FLAG_METADATA_AUTH, PROBE_METADATA_SECURITY_LEVEL, 946,
-                "progress.hardware.probe.metadata_security_level",
-                () -> applyStructuralProbeResult(result, FLAG_METADATA_AUTH,
-                        PROBE_METADATA_SECURITY_LEVEL,
-                        StructuralKeystoreProbes.runMetadataSecurityLevels(
-                                ks2GeneratedMetadata.get(targetAlias),
-                                ks2EntryMetadata.get(targetAlias))));
-        runOptionalProgressProbe(result, FLAG_ATTEST_KEY_DESCRIPTOR_DELEGATION, 947,
-                "progress.hardware.probe.attest_key_descriptor_delegation",
-                () -> runAttestKeyDescriptorDelegationProbe(context, result));
-        runProgressProbe(result, FLAG_BINDER_LOCALITY, PROBE_BINDER_LOCALITY, 948,
-                "progress.hardware.probe.binder_locality",
-                () -> applyStructuralProbeResult(result, FLAG_BINDER_LOCALITY,
-                        PROBE_BINDER_LOCALITY, StructuralKeystoreProbes.runBinderLocality()));
-        runProgressProbe(result, FLAG_KEY_ID_CONSISTENCY,
-                PROBE_KEY_ID_CONSISTENCY, 950,
-                "progress.hardware.probe.key_id_consistency",
-                () -> applyStatePlaneProbeResult(result, FLAG_KEY_ID_CONSISTENCY,
-                        PROBE_KEY_ID_CONSISTENCY,
-                        KeystoreStatePlaneProbes.runAliasKeyIdConsistency()));
-        runProgressProbe(result, FLAG_KEYSTORE_LEDGER,
-                PROBE_KEYSTORE_LEDGER, 952,
-                "progress.hardware.probe.keystore_ledger",
-                () -> applyStatePlaneProbeResult(result, FLAG_KEYSTORE_LEDGER,
-                        PROBE_KEYSTORE_LEDGER,
-                        KeystoreStatePlaneProbes.runLedgerStatePlane()));
-        runProgressProbe(result, FLAG_INTERFACE_TOKEN_DISPATCH,
-                PROBE_INTERFACE_TOKEN_DISPATCH, 970,
-                "progress.hardware.probe.interface_token_dispatch",
-                () -> OmkRiskyProbes.runTokenDispatch(namedSilentReporter(result,
-                        FLAG_INTERFACE_TOKEN_DISPATCH, PROBE_INTERFACE_TOKEN_DISPATCH)));
-        runProgressProbe(result, FLAG_PARAMETER_FINGERPRINT,
-                PROBE_PARAMETER_FINGERPRINT, 975,
-                "progress.hardware.probe.parameter_fingerprint",
-                () -> OmkRiskyProbes.runParameterFingerprint(namedSilentReporter(result,
-                        FLAG_PARAMETER_FINGERPRINT, PROBE_PARAMETER_FINGERPRINT)));
-        runProgressProbe(result, FLAG_TEESIM_PARAMETER_FINGERPRINT,
-                PROBE_TEESIM_PARAMETER_FINGERPRINT, 980,
-                "progress.hardware.probe.teesim_parameter_fingerprint",
-                () -> OmkRiskyProbes.runTeeSimFingerprint(namedSilentReporter(result,
-                        FLAG_TEESIM_PARAMETER_FINGERPRINT,
-                        PROBE_TEESIM_PARAMETER_FINGERPRINT)));
+        runProbeSteps(result,
+                ProbeStep.required(FLAG_METADATA_AUTH, PROBE_METADATA_SECURITY_LEVEL, 946,
+                        "progress.hardware.probe.metadata_security_level",
+                        () -> applyStructuralProbeResult(result, FLAG_METADATA_AUTH,
+                                PROBE_METADATA_SECURITY_LEVEL,
+                                StructuralKeystoreProbes.runMetadataSecurityLevels(
+                                        ks2GeneratedMetadata.get(targetAlias),
+                                        ks2EntryMetadata.get(targetAlias)))),
+                ProbeStep.optional(FLAG_ATTEST_KEY_DESCRIPTOR_DELEGATION, 947,
+                        "progress.hardware.probe.attest_key_descriptor_delegation",
+                        () -> runAttestKeyDescriptorDelegationProbe(context, result)),
+                ProbeStep.required(FLAG_BINDER_LOCALITY, PROBE_BINDER_LOCALITY, 948,
+                        "progress.hardware.probe.binder_locality",
+                        () -> applyStructuralProbeResult(result, FLAG_BINDER_LOCALITY,
+                                PROBE_BINDER_LOCALITY,
+                                StructuralKeystoreProbes.runBinderLocality(
+                                        context == null ? null : context.getClassLoader(),
+                                        targetAlias))),
+                ProbeStep.required(FLAG_KEY_ID_CONSISTENCY, PROBE_KEY_ID_CONSISTENCY, 950,
+                        "progress.hardware.probe.key_id_consistency",
+                        () -> applyStatePlaneProbeResult(result, FLAG_KEY_ID_CONSISTENCY,
+                                PROBE_KEY_ID_CONSISTENCY,
+                                KeystoreStatePlaneProbes.runAliasKeyIdConsistency())),
+                ProbeStep.required(FLAG_KEYSTORE_LEDGER, PROBE_KEYSTORE_LEDGER, 952,
+                        "progress.hardware.probe.keystore_ledger",
+                        () -> applyStatePlaneProbeResult(result, FLAG_KEYSTORE_LEDGER,
+                                PROBE_KEYSTORE_LEDGER,
+                                KeystoreStatePlaneProbes.runLedgerStatePlane())),
+                ProbeStep.required(FLAG_INTERFACE_TOKEN_DISPATCH,
+                        PROBE_INTERFACE_TOKEN_DISPATCH, 970,
+                        "progress.hardware.probe.interface_token_dispatch",
+                        () -> OmkRiskyProbes.runTokenDispatch(namedSilentReporter(result,
+                                FLAG_INTERFACE_TOKEN_DISPATCH, PROBE_INTERFACE_TOKEN_DISPATCH))),
+                ProbeStep.required(FLAG_AIDL_TRAILING_DATA, PROBE_AIDL_TRAILING_DATA, 972,
+                        "progress.hardware.probe.aidl_trailing_data",
+                        () -> OmkRiskyProbes.runAidlTrailingData(namedSilentReporter(result,
+                                FLAG_AIDL_TRAILING_DATA, PROBE_AIDL_TRAILING_DATA))),
+                ProbeStep.required(FLAG_PARAMETER_FINGERPRINT, PROBE_PARAMETER_FINGERPRINT, 975,
+                        "progress.hardware.probe.parameter_fingerprint",
+                        () -> OmkRiskyProbes.runParameterFingerprint(namedSilentReporter(result,
+                                FLAG_PARAMETER_FINGERPRINT, PROBE_PARAMETER_FINGERPRINT,
+                                OmkRiskyProbes.CHECK_BACKEND_PROVENANCE,
+                                PROBE_BACKEND_PROVENANCE))),
+                ProbeStep.required(FLAG_TEESIM_PARAMETER_FINGERPRINT,
+                        PROBE_TEESIM_PARAMETER_FINGERPRINT, 980,
+                        "progress.hardware.probe.teesim_parameter_fingerprint",
+                        () -> OmkRiskyProbes.runTeeSimFingerprint(namedSilentReporter(result,
+                                FLAG_TEESIM_PARAMETER_FINGERPRINT,
+                                PROBE_TEESIM_PARAMETER_FINGERPRINT))));
     }
 
     private static final class AttestationProfile {
@@ -2728,8 +2995,13 @@ public class KeyAttestation {
             Context context,
             ActiveProbeResult result
     ) {
-        boolean featureDeclared = context.getPackageManager().hasSystemFeature(
-                FEATURE_DEVICE_ID_ATTESTATION);
+        ProbeCapabilities capabilitySnapshot = capabilities(context);
+        if (!capabilitySnapshot.queryAvailable) {
+            result.unavailable("hardware.attestation.device_properties.unavailable",
+                    "Device ID Attestation 能力查询未完成");
+            return ProbeApplicability.UNAVAILABLE;
+        }
+        boolean featureDeclared = capabilitySnapshot.deviceIdAttestation;
         if (!AttestationStateEvidence.shouldRunDeviceProperties(
                 Build.VERSION.SDK_INT, featureDeclared)) {
             result.normal("设备未声明可选的 Device ID Attestation 能力，本项不适用");
@@ -2763,7 +3035,7 @@ public class KeyAttestation {
             if (first.keyGenerated || first.failure == null) {
                 result.skipped("Device Properties Attestation 探针无法完成："
                         + first.unavailableEvidence + "；" + baselineBefore.evidence);
-                return ProbeApplicability.APPLICABLE;
+                return ProbeApplicability.UNAVAILABLE;
             }
 
             DevicePropertiesControlResult baselineAfter =
@@ -2786,7 +3058,7 @@ public class KeyAttestation {
                 result.skipped("Device Properties Attestation 重试仍无法完成："
                         + retry.unavailableEvidence + "；" + baselineBefore.evidence
                         + "；" + baselineAfter.evidence);
-                return ProbeApplicability.APPLICABLE;
+                return ProbeApplicability.UNAVAILABLE;
             }
 
             boolean transientOrUnclassified =
@@ -2822,11 +3094,13 @@ public class KeyAttestation {
                         + first.unavailableEvidence + "；" + retry.unavailableEvidence
                         + "；" + baselineBefore.evidence + "；" + baselineAfter.evidence
                         + "；" + reason);
+                return ProbeApplicability.UNAVAILABLE;
             }
         } catch (Throwable t) {
             result.skipped("Device Properties Attestation 探针无法执行："
                     + describeProbeFailure(t));
             Log.w(TAG, "runDevicePropertiesProbe failed", t);
+            return ProbeApplicability.UNAVAILABLE;
         }
         return ProbeApplicability.APPLICABLE;
     }
@@ -2943,7 +3217,7 @@ public class KeyAttestation {
             keyStore = acquireKeyStore();
             AttestationResult rsa = generateAlgorithmProbe(keyStore, KeyProperties.KEY_ALGORITHM_RSA, true);
             if (rsa == null || rsa.showAttestation == null) {
-                result.skipped("当前 KeyMint 未返回 RSA 证明链，跳过 RSA / EC 对照");
+                result.notApplicable("当前 KeyMint 未返回 RSA 证明链，RSA / EC 对照不适用");
                 return;
             }
             String mismatch = compareAlgorithmProfiles(
@@ -2961,6 +3235,37 @@ public class KeyAttestation {
         }
     }
 
+    /**
+     * StrongBox's feature bit does not provision an attestation signing key.  KeyMint reports
+     * that state with -74/-75 on current releases, while some vendor wrappers use the equivalent
+     * named error or a not-configured/availability code.  These are capability outcomes, not
+     * evidence that a successfully generated StrongBox key was downgraded.
+     */
+    private static boolean isStrongBoxAttestationProvisioningFailure(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            String text = String.valueOf(current).toUpperCase(java.util.Locale.US);
+            if (text.contains("ATTESTATION_KEYS_NOT_PROVISIONED")
+                    || text.contains("ATTESTATION_IDS_NOT_PROVISIONED")
+                    || text.contains("KEYMINT_NOT_CONFIGURED")) {
+                return true;
+            }
+            for (int code : new int[]{-74, -75, -64, -68, -85}) {
+                String needle = Integer.toString(code);
+                int at = text.indexOf(needle);
+                while (at >= 0) {
+                    int before = at == 0 ? -1 : text.charAt(at - 1);
+                    int after = at + needle.length() >= text.length()
+                            ? -1 : text.charAt(at + needle.length());
+                    if (!Character.isDigit(before) && !Character.isDigit(after)) return true;
+                    at = text.indexOf(needle, at + needle.length());
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private static ProbeApplicability runStrongBoxDifferentialProbe(Context context, ActiveProbeResult result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             if (BuildConfig.DEBUG) Log.d(TAG, "StrongBox differential not applicable below Android 9");
@@ -2968,10 +3273,16 @@ public class KeyAttestation {
         }
         if (context == null) {
             result.skipped("StrongBox 对照缺少应用上下文");
-            return ProbeApplicability.APPLICABLE;
+            return ProbeApplicability.UNAVAILABLE;
         }
-        if (!context.getPackageManager().hasSystemFeature(
-                PackageManager.FEATURE_STRONGBOX_KEYSTORE)) {
+        ProbeCapabilities capabilitySnapshot = capabilities(context);
+        if (!capabilitySnapshot.queryAvailable) {
+            result.unavailable("hardware.attestation.strongbox_differential.unavailable",
+                    "StrongBox 能力查询未完成");
+            return ProbeApplicability.UNAVAILABLE;
+        }
+        boolean isStrongBoxSupported = capabilitySnapshot.strongBox;
+        if (!isStrongBoxSupported) {
             if (BuildConfig.DEBUG) Log.d(TAG, "StrongBox differential not applicable: feature not declared");
             return ProbeApplicability.NOT_APPLICABLE;
         }
@@ -2990,12 +3301,34 @@ public class KeyAttestation {
                     .setIsStrongBoxBacked(true);
             KeyPairGenerator generator = KeyPairGenerator.getInstance(
                     KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
-            generator.initialize(builder.build());
-            generator.generateKeyPair();
+            // Keep request setup/generation separate from certificate parsing. The feature bit
+            // is a platform capability declaration: if the actual StrongBox request cannot be
+            // initialized or generated, that contradiction is a finding. Later failures while
+            // reading or parsing the returned chain remain ordinary probe-unavailable cases.
+            try {
+                generator.initialize(builder.build());
+                generator.generateKeyPair();
+            } catch (Throwable generationFailure) {
+                String detail = "[hardware.attestation.strongbox_capability] 设备声明 "
+                        + "FEATURE_STRONGBOX_KEYSTORE，但 StrongBox 密钥生成请求失败："
+                        + describeProbeFailure(generationFailure);
+                // FEATURE_STRONGBOX_KEYSTORE describes the hardware path, not the presence of
+                // vendor-provisioned attestation signing keys. A device can therefore advertise
+                // StrongBox and legitimately reject this attested request with
+                // ATTESTATION_KEYS_NOT_PROVISIONED (or an equivalent availability error).
+                if (isStrongBoxAttestationProvisioningFailure(generationFailure)) {
+                    result.notApplicable(detail + "；设备未提供 StrongBox 证明密钥，本项不适用");
+                    Log.i(TAG, "StrongBox attestation keys are not provisioned", generationFailure);
+                    return ProbeApplicability.NOT_APPLICABLE;
+                }
+                result.unavailable("hardware.attestation.strongbox_differential.unavailable", detail);
+                Log.w(TAG, "StrongBox generation did not produce a classifiable attestation", generationFailure);
+                return ProbeApplicability.UNAVAILABLE;
+            }
             Certificate[] chain = keyStore.getCertificateChain(probeAlias);
             if (chain == null || chain.length == 0) {
                 result.skipped("StrongBox 请求未返回证书链");
-                return ProbeApplicability.APPLICABLE;
+                return ProbeApplicability.UNAVAILABLE;
             }
             CertificateFactory factory = CertificateFactory.getInstance("X.509");
             ArrayList<X509Certificate> certificates = new ArrayList<>(chain.length);
@@ -3004,7 +3337,7 @@ public class KeyAttestation {
             Attestation attestation = parsed == null ? null : parsed.showAttestation;
             if (attestation == null) {
                 result.skipped("StrongBox 请求已成功但证书中没有可解析的 Attestation 记录");
-                return ProbeApplicability.APPLICABLE;
+                return ProbeApplicability.UNAVAILABLE;
             }
 
             int attestationLevel = attestation.getAttestationSecurityLevel();
@@ -3035,7 +3368,7 @@ public class KeyAttestation {
                 var privateKey = keyStore.getKey(probeAlias, null);
                 if (!(privateKey instanceof PrivateKey)) {
                     result.skipped("StrongBox 请求后无法读回私钥，跳过 KeyInfo 安全级别对照");
-                    return ProbeApplicability.APPLICABLE;
+                    return ProbeApplicability.UNAVAILABLE;
                 }
                 var keyInfo = KeyFactory.getInstance(privateKey.getAlgorithm(), "AndroidKeyStore")
                         .getKeySpec(privateKey, KeyInfo.class);
@@ -3054,6 +3387,7 @@ public class KeyAttestation {
                 result.skipped("StrongBox 请求后的 KeyInfo 对照无法执行："
                         + t.getClass().getSimpleName() + ": " + t.getMessage());
                 Log.w(TAG, "StrongBox KeyInfo comparison failed", t);
+                return ProbeApplicability.UNAVAILABLE;
             }
 
             if (keymasterStrongBox
@@ -3063,15 +3397,13 @@ public class KeyAttestation {
                 result.normal("StrongBox 请求、被测密钥 Attestation 和 KeyInfo 对照通过");
             }
         } catch (Throwable t) {
-            // FEATURE_STRONGBOX_KEYSTORE is a capability declaration. A provider
-            // may still have no slot, reject attestation for this key profile, or expose StrongBox
-            // only to privileged callers. Those normal capability limits make the differential
-            // inapplicable; they are not an execution failure and must not become an UNAVAILABLE
-            // finding on ordinary devices.
-            result.normal("StrongBox 差分不适用：系统未接受本次 StrongBox 证明请求（"
-                    + t.getClass().getSimpleName() + ")");
+            // The feature declaration made this an applicable probe. A failure after entering
+            // the request/readback path is incomplete evidence, not proof that StrongBox is
+            // unsupported and not a capability contradiction by itself.
+            result.unavailable("hardware.attestation.strongbox_differential.unavailable",
+                    "StrongBox 差分探针未完成：" + t.getClass().getSimpleName());
             Log.w(TAG, "runStrongBoxDifferentialProbe failed", t);
-            return ProbeApplicability.NOT_APPLICABLE;
+            return ProbeApplicability.UNAVAILABLE;
         } finally {
             if (keyStore != null) safeDeleteEntry(keyStore, probeAlias);
         }
@@ -3239,7 +3571,7 @@ public class KeyAttestation {
 
     private static void runKeyMetadataAuthorizationProbe(String targetAlias, AttestationResult attestationResult, ActiveProbeResult result) {
         if (!useKs2) {
-            result.skipped("KeyMetadata 授权一致性探针需要 Keystore2");
+            result.notApplicable("当前 Android 版本/实现未提供 Keystore2 KeyMetadata，本项不适用");
             return;
         }
         KeyMetadata generated = ks2GeneratedMetadata.get(targetAlias);
@@ -3391,7 +3723,7 @@ public class KeyAttestation {
         Integer vendorPatch = att.getVendorPatchLevel();
         Integer bootPatch = att.getBootPatchLevel();
         if (osPatch == null && vendorPatch == null && bootPatch == null) {
-            result.skipped("未能从 Attestation / teeEnforced / softwareEnforced 中读取 OS/Vendor/Boot PatchLevel 字段，跳过补丁级别一致性探针");
+            result.notApplicable("当前证明链未提供 OS/Vendor/Boot PatchLevel 字段，本项不适用");
             return;
         }
 
@@ -3645,7 +3977,7 @@ public class KeyAttestation {
     private static void checkChildSignedByAttestKey(String label, Certificate[] childChain, Certificate[] attestKeyChain, ActiveProbeResult result) {
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !hasAttestKey) {
-                result.skipped(label + "：设备不支持 App Attest Key，跳过 AttestKey 交叉签名验证");
+                result.notApplicable(label + "：设备不支持 App Attest Key，交叉签名验证不适用");
                 return;
             }
             X509Certificate childLeaf = firstX509(childChain);
@@ -3655,7 +3987,7 @@ public class KeyAttestation {
                 return;
             }
             if (childLeaf.getExtensionValue(ANDROID_KEY_ATTESTATION_OID) == null) {
-                result.skipped(label + "：业务 leaf 不含 Android Key Attestation 扩展，无法完成 setAttestKeyAlias 链路验证");
+                result.notApplicable(label + "：业务 leaf 不含 Android Key Attestation 扩展，setAttestKeyAlias 链路验证不适用");
                 return;
             }
 
@@ -3703,17 +4035,22 @@ public class KeyAttestation {
             result.normal("本轮未生成可用的 App AttestKey，交叉签名验证不适用");
             return ProbeApplicability.NOT_APPLICABLE;
         }
+        if (firstX509(mainAliasChain) == null || firstX509(attestKeyChain) == null) {
+            result.unavailable("hardware.attestation.cross_sign.unavailable",
+                    "主业务 key 或 App AttestKey 缺少可解析 leaf，交叉签名探针未完成");
+            return ProbeApplicability.UNAVAILABLE;
+        }
         checkChildSignedByAttestKey("主业务 key / App AttestKey 交叉验证", mainAliasChain, attestKeyChain, result);
         return ProbeApplicability.APPLICABLE;
     }
 
     private static void runMultiLayerAttestKeyGraphProbe(ActiveProbeResult result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            result.skipped("多层 AttestKey 链路图探针需要 Android 12+");
+            result.notApplicable("多层 AttestKey 链路图探针需要 Android 12+");
             return;
         }
-        if (!hasAttestKey) {
-            result.skipped("设备未声明 FEATURE_KEYSTORE_APP_ATTEST_KEY，跳过多层 AttestKey 链路图探针");
+        if (!hasAttestKey || !attestAliasReady) {
+            result.notApplicable("本轮没有可用的 App AttestKey，多层 AttestKey 链路图探针不适用");
             return;
         }
 
@@ -3728,15 +4065,16 @@ public class KeyAttestation {
             safeDeleteEntry(keyStore, childC);
 
             if (!generateTemporaryAttestKey(attestA, null, "graph-A")) {
-                result.skipped("多层 AttestKey 链路图探针：A 层 PURPOSE_ATTEST_KEY 生成失败");
+                result.unavailable("hardware.attestation.certificate_graph.unavailable",
+                        "多层 AttestKey 链路图探针：A 层 PURPOSE_ATTEST_KEY 生成失败");
                 return;
             }
             if (!generateTemporaryAttestKey(attestB, attestA, "graph-B")) {
-                result.skipped("多层 AttestKey 链路图探针：B 层 AttestKey 由 A 签发失败；该 ROM 可能不支持 AttestKey 签发 AttestKey");
+                result.notApplicable("多层 AttestKey 链路图探针：该 ROM 不支持 AttestKey 签发 AttestKey");
                 return;
             }
             if (!generateChildWithAttestKey(childC, attestB)) {
-                result.skipped("多层 AttestKey 链路图探针：C 层业务 key 由 B 签发失败");
+                result.notApplicable("多层 AttestKey 链路图探针：当前 KeyMint 不支持该多层签发组合");
                 return;
             }
 
@@ -3879,11 +4217,11 @@ public class KeyAttestation {
 
     private static void runAttestKeyNegativeControlProbe(ActiveProbeResult result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            result.skipped("AttestKey 负对照探针需要 Android 12+");
+            result.notApplicable("AttestKey 负对照探针需要 Android 12+");
             return;
         }
-        if (!hasAttestKey) {
-            result.skipped("设备未声明 FEATURE_KEYSTORE_APP_ATTEST_KEY，跳过 AttestKey 负对照探针");
+        if (!hasAttestKey || !attestAliasReady) {
+            result.notApplicable("本轮没有可用的 App AttestKey，AttestKey 负对照探针不适用");
             return;
         }
 
@@ -4011,11 +4349,11 @@ public class KeyAttestation {
 
     private static void runAttestKeyTrapProbe(Context context, ActiveProbeResult result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            result.skipped("AttestKey 语义陷阱需要 Android 12+");
+            result.notApplicable("AttestKey 语义陷阱需要 Android 12+");
             return;
         }
-        if (!hasAttestKey) {
-            result.skipped("设备未声明 FEATURE_KEYSTORE_APP_ATTEST_KEY，跳过 AttestKey 语义陷阱");
+        if (!hasAttestKey || !attestAliasReady) {
+            result.notApplicable("本轮没有可用的 App AttestKey，AttestKey 语义陷阱不适用");
             return;
         }
 
@@ -4104,11 +4442,12 @@ public class KeyAttestation {
         try {
             X509Certificate leaf = firstX509(chain);
             if (leaf == null) {
-                result.skipped("CTS leaf profile 探针未找到叶子 X.509 证书");
+                result.unavailable("hardware.attestation.leaf_constraints.unavailable",
+                        "CTS leaf profile 探针未找到叶子 X.509 证书");
                 return;
             }
             if (leaf.getExtensionValue(ANDROID_KEY_ATTESTATION_OID) == null) {
-                result.skipped("叶子证书未直接包含 Android Key Attestation 扩展，跳过 CTS leaf profile");
+                result.notApplicable("叶子证书未直接包含 Android Key Attestation 扩展，CTS leaf profile 不适用");
                 return;
             }
 
@@ -4373,8 +4712,8 @@ public class KeyAttestation {
                     packageName, PackageManager.GET_SIGNING_CERTIFICATES);
             android.content.pm.SigningInfo signingInfo = modern.signingInfo;
             if (signingInfo == null) {
-                result.skipped("系统未返回当前 APK 的 SigningInfo");
-                return ProbeApplicability.APPLICABLE;
+                result.notApplicable("系统未返回当前 APK 的 SigningInfo，签名 lineage 对照不适用");
+                return ProbeApplicability.NOT_APPLICABLE;
             }
             if (signingInfo.hasMultipleSigners()) {
                 if (BuildConfig.DEBUG) {
@@ -4397,15 +4736,15 @@ public class KeyAttestation {
             Set<String> legacyExpected = digestPackageSignatures(legacy.signatures);
             if (history.size() <= current.size() || legacyExpected.isEmpty()
                     || history.equals(legacyExpected)) {
-                result.skipped("签名 API 未形成可区分的 legacy lineage 对照");
-                return ProbeApplicability.APPLICABLE;
+                result.notApplicable("签名 API 未形成可区分的 legacy lineage 对照");
+                return ProbeApplicability.NOT_APPLICABLE;
             }
 
             X509Certificate leaf = firstX509(chain);
             ApplicationIdInfo appId = leaf == null ? null : parseAttestationApplicationId(leaf);
             if (appId == null || appId.signatureDigestsHex.isEmpty()) {
-                result.skipped("AttestationApplicationId 签名摘要不可用，跳过 lineage 对照");
-                return ProbeApplicability.APPLICABLE;
+                result.notApplicable("AttestationApplicationId 签名摘要不可用，lineage 对照不适用");
+                return ProbeApplicability.NOT_APPLICABLE;
             }
 
             // 只识别报告中模拟器的确定性实现特征：把完整 signing history 写入
@@ -4424,6 +4763,7 @@ public class KeyAttestation {
             result.skipped("APK signing lineage 探针无法建立确定性对照："
                     + t.getClass().getSimpleName() + ": " + t.getMessage());
             Log.w(TAG, "runSigningLineageProbe failed", t);
+            return ProbeApplicability.UNAVAILABLE;
         }
         return ProbeApplicability.APPLICABLE;
     }
@@ -4442,7 +4782,7 @@ public class KeyAttestation {
         try {
             X509Certificate leaf = firstX509(chain);
             if (leaf == null || leaf.getExtensionValue(ANDROID_KEY_ATTESTATION_OID) == null) {
-                result.skipped("AttestationApplicationId 探针未找到带 Android Key Attestation 扩展的叶子证书");
+                result.notApplicable("AttestationApplicationId 探针未找到带 Android Key Attestation 扩展的叶子证书");
                 return;
             }
 
@@ -4487,7 +4827,7 @@ public class KeyAttestation {
                     return;
                 }
             } else {
-                result.skipped("AttestationApplicationId 包名可解析但签名摘要为空或当前签名不可读，签名对照未完成：packages="
+                result.notApplicable("AttestationApplicationId 包名可解析但签名摘要为空或当前签名不可读，签名对照不适用：packages="
                         + appId.packageNames + ", digests=" + appId.signatureDigestsHex);
                 return;
             }
@@ -4526,6 +4866,7 @@ public class KeyAttestation {
 
     private static int runExclusive(Context context, Object callback) {
         initSharedData(context);
+        ACTIVE_CAPABILITIES.set(ProbeCapabilities.capture(context));
         ACTIVE_BINDINGS.get().clear();
         ks2GeneratedCertificateChain.clear();
         ks2CertificateChain.clear();
@@ -4567,6 +4908,7 @@ public class KeyAttestation {
             ACTIVE_PROGRESS_METHOD.remove();
             ACTIVE_KEY_STORE.remove();
             ACTIVE_BINDINGS.remove();
+            ACTIVE_CAPABILITIES.remove();
         }
     }
 
@@ -4578,30 +4920,81 @@ public class KeyAttestation {
 
         try {
             postProgress(60, "progress.hardware.chain_integrity");
+            // Install the Keystore2 observation hook before the primary key requests, matching
+            // the remote baseline so both App AttestKey and business-key traffic are observed.
             hookSuccess = installHook();
-            var pm = context.getPackageManager();
-            hasAttestKey = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) && pm.hasSystemFeature(PackageManager.FEATURE_KEYSTORE_APP_ATTEST_KEY);
+            // Read the platform capability before making the request. A declared capability
+            // followed by a failed generation is an observable contradiction; it must not be
+            // silently converted into the ordinary-key fallback below.
+            ProbeCapabilities capabilitySnapshot = capabilities(context);
+            if (context != null && !capabilitySnapshot.queryAvailable) {
+                throw new IllegalStateException("PackageManager capability query unavailable");
+            }
+            boolean isAttestKeySupported = capabilitySnapshot.appAttestKey;
+            hasAttestKey = isAttestKeySupported;
             var keyStore = acquireKeyStore();
             safeDeleteEntry(keyStore, alias);
             safeDeleteEntry(keyStore, attestAlias);
 
-            // 生成失败属于流程无法继续，不是“检测命中后提前返回”。这里保留快速失败。
+            // App AttestKey is optional; ordinary system-attestation generation below remains
+            // the primary capability gate when this auxiliary key cannot be created.
             postProgress(140, hasAttestKey ? "progress.hardware.generate_attest_key" : "progress.hardware.generate_attestation_key");
-            if (hasAttestKey && !generateKey(attestAlias)) {
-                runActiveForgeryProbes(context, alias, null, null, null, null,
-                        collectedResult);
-                updateKeyAttestationDetail("Key Attestation：AttestKey 生成失败或签名验证失败，无法继续完整检测\n"
-                        + collectedResult.text());
-                return collectedResult.suspicious ? 64 : 2;
+            boolean appAttestKeyGenerated = false;
+            if (hasAttestKey) {
+                boolean generated = false;
+                Throwable generationFailure = null;
+                try {
+                    generated = generateKey(attestAlias);
+                } catch (Throwable failure) {
+                    generationFailure = failure;
+                }
+                if (!generated) {
+                    if (generationFailure != null) {
+                        Log.e(TAG, "App AttestKey generation failed; alias=" + attestAlias,
+                                generationFailure);
+                    }
+                    String detail = generationFailure == null
+                            ? "App AttestKey 生成请求返回失败"
+                            : "App AttestKey 生成请求失败：" + describeProbeFailure(generationFailure);
+                    // Keep the normal-key fallback so a provider failure cannot hide the rest
+                    // of the hardware proof, but preserve the declared-capability contradiction
+                    // as a detected finding. Bit 13 is the established App-AttestKey carrier
+                    // for both descriptor and capability checks; the evidence text carries the
+                    // more specific check identity.
+                    collectedResult.high(FLAG_ATTEST_KEY_DESCRIPTOR_DELEGATION,
+                            "[hardware.attestation.app_attest_key_capability] "
+                                    + "设备声明 FEATURE_KEYSTORE_APP_ATTEST_KEY，但 App AttestKey 生成失败："
+                                    + detail);
+                    Log.w(TAG, detail + "；回退到系统默认 Attestation key"
+                            + " [alias=" + attestAlias
+                            + ", hook=" + hookSuccess
+                            + ", hasAttestKey=" + hasAttestKey + "]");
+                } else {
+                    appAttestKeyGenerated = true;
+                }
             }
-            attestAliasReady = hasAttestKey;
+            attestAliasReady = appAttestKeyGenerated;
             postProgress(260, "progress.hardware.generate_business_key");
-            if (!generateKey(alias)) {
-                runActiveForgeryProbes(context, alias, null, null, null, null,
-                        collectedResult);
-                updateKeyAttestationDetail("Key Attestation：密钥生成失败或签名验证失败，无法继续完整检测\n"
-                        + collectedResult.text());
-                return collectedResult.suspicious ? 64 : 2;
+            boolean generated = false;
+            Throwable generationFailure = null;
+            try {
+                generated = generateKey(alias);
+            } catch (Throwable failure) {
+                generationFailure = failure;
+            }
+            if (!generated) {
+                if (generationFailure != null) {
+                    Log.e(TAG, "Business attestation key generation failed; alias=" + alias,
+                            generationFailure);
+                }
+                return returnPrimaryAttestationUnavailable(collectedResult,
+                        (generationFailure == null
+                                ? "主业务密钥生成请求返回失败，无法继续完整检测"
+                                : "主业务密钥生成请求失败：" + describeProbeFailure(generationFailure))
+                                + " [alias=" + alias
+                                + ", attestAliasReady=" + attestAliasReady
+                                + ", hook=" + hookSuccess
+                                + ", hasAttestKey=" + hasAttestKey + "]");
             }
 
             postProgress(380, "progress.hardware.read_chain");
@@ -4660,10 +5053,8 @@ public class KeyAttestation {
                 // A parser incompatibility or malformed optional extension means the
                 // attestation result is unavailable, not proof of key forgery.
                 Log.w(TAG, "certificate attestation parsing failed", t);
-                runActiveForgeryProbes(context, alias, combinedCertificates, certificates,
-                        attestCertificates, null, collectedResult);
-                updateKeyAttestationDetail("Key Attestation 证书解析失败：" + t + "\n" + collectedResult.text());
-                return collectedResult.suspicious ? 64 : 2;
+                return returnPrimaryAttestationUnavailable(collectedResult,
+                        "证书解析失败：" + describeProbeFailure(t));
             }
             var keyStatus = result.getStatus();
             var untrusted = keyStatus == CertificateInfo.KEY_FAILED
@@ -4695,13 +5086,8 @@ public class KeyAttestation {
             boolean isDeviceLocked = false;
             int verifiedBootState = -1;
             if (rootOfTrust == null) {
-                collectedResult.high(FLAG_ROOT_OF_TRUST_MISSING,
+                return returnPrimaryAttestationUnavailable(collectedResult,
                         "未能从证书链中解析出 RootOfTrust");
-                runActiveForgeryProbes(context, alias, combinedCertificates, certificates,
-                        attestCertificates, result, collectedResult);
-                updateKeyAttestationDetail(buildCertificateChainSummary(result)
-                        + "\n\n未能从证书链中解析出 RootOfTrust\n" + collectedResult.text());
-                return 64;
             } else {
                 isDeviceLocked = rootOfTrust.isDeviceLocked();
                 verifiedBootState = rootOfTrust.getVerifiedBootState();
@@ -4866,12 +5252,8 @@ public class KeyAttestation {
             return finalReturn;
         } catch (Throwable t) {
             Log.e(TAG, "Error while loading keystore", t);
-            collectedResult.skipped("主检测流程未能完成：" + t.getClass().getSimpleName());
-            runActiveForgeryProbes(context, alias, null, null, null, result, collectedResult);
-            String base = result == null ? "" : buildCertificateChainSummary(result);
-            updateKeyAttestationDetail(base
-                    + "\n\nKey Attestation 执行失败：" + t + " (" + collectedResult.flagHex() + ")\n" + collectedResult.text());
-            return collectedResult.suspicious ? 64 : 2;
+            return returnPrimaryAttestationUnavailable(collectedResult,
+                    "主检测流程未能完成：" + describeProbeFailure(t));
         } finally {
             // Publish established evidence even when later parsing or optional data is unavailable.
             lastProbeFlags = collectedResult.flags;
@@ -4888,7 +5270,7 @@ public class KeyAttestation {
     private static boolean generateKey(String alias) throws Throwable {
         var now = new Date();
         byte[] request = new byte[32];
-        new SecureRandom().nextBytes(request);
+        PROBE_RANDOM.nextBytes(request);
         var isAttestKey = Objects.equals(alias, attestAlias);
         var purposes = isAttestKey ? KeyProperties.PURPOSE_ATTEST_KEY : KeyProperties.PURPOSE_SIGN;
 
