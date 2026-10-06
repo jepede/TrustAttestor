@@ -1,0 +1,65 @@
+name: Android CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Android build toolchain
+        uses: ./.github/actions/setup-android-build
+        with:
+          cache-read-only: "true"
+
+      - name: Build debug APK with the CLI path
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash android/build-cli.sh debug \
+            --no-sdk-install \
+            --build-root "$RUNNER_TEMP/trustattestor-ci"
+
+      - name: Run host regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TRUST_ATTESTOR_BUILD_ROOT="$RUNNER_TEMP/trustattestor-ci"
+          export GRADLE_USER_HOME="$TRUST_ATTESTOR_BUILD_ROOT/gradle-user"
+          export ANDROID_USER_HOME="$TRUST_ATTESTOR_BUILD_ROOT/android-user"
+          export TRUST_ATTESTOR_TEMP="$TRUST_ATTESTOR_BUILD_ROOT/temp"
+          export TEMP="$TRUST_ATTESTOR_TEMP"
+          export TMP="$TRUST_ATTESTOR_TEMP"
+          export TMPDIR="$TRUST_ATTESTOR_TEMP"
+          cd android
+          ./gradlew --no-daemon --console=plain --stacktrace \
+            "-PtrustAttestorBuildRoot=$TRUST_ATTESTOR_BUILD_ROOT" \
+            :dex:check \
+            :app:testDebugUnitTest
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: TrustAttestor-debug-${{ github.sha }}
+          path: ${{ steps.build.outputs.apk_path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

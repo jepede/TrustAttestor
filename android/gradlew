@@ -163,7 +163,7 @@ if [ ! -f "$ANDROID_USER_HOME/debug.keystore" ]; then
     TRUST_ATTESTOR_KEYTOOL=${JAVA_HOME:+"$JAVA_HOME/bin/"}keytool
     "$TRUST_ATTESTOR_KEYTOOL" -genkeypair -keystore "$ANDROID_USER_HOME/debug.keystore" \
         -storepass android -keypass android -alias androiddebugkey \
-        -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 \
+        -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 -storetype JKS \
         >/dev/null 2>&1 || die "Could not create the external debug keystore."
 fi
 

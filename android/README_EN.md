@@ -78,31 +78,48 @@ android/
 
 ## Compatibility and build
 
-Requirements: JDK 17, Android SDK Platform 35, Build Tools 35.0.0 (the DEX flow also reads the 35.0.1 `d8.jar`), NDK 27.2.12479018, and SDK CMake. The SDK can come from Android Studio or the Android SDK environment; `local.properties` is machine-local and must not be committed.
+The toolchain is pinned in [`gradle.properties`](gradle.properties): JDK 17, Android SDK Platform 35, Build Tools 35.0.0, Build Tools 35.0.1 for the embedded R8/D8 path, NDK 27.2.12479018, and CMake 3.22.1. Gradle and GitHub Actions consume the same values so local and CI toolchains cannot silently drift.
 
-```properties
-sdk.dir=/absolute/path/to/Android/Sdk
+### Linux / macOS CLI
+
+JDK 17, Android SDK command-line tools (including `sdkmanager`), and Git are sufficient. The CLI checks/installs the pinned Platform, Build Tools, NDK and CMake packages and keeps Gradle/Kotlin/CMake/DEX/APK state outside the checkout:
+
+```bash
+git clone --recurse-submodules https://github.com/jepede/TrustAttestor.git
+cd TrustAttestor
+
+# Contributor build with an isolated generated Debug JKS
+bash android/build-cli.sh debug
+
+# Local release-shaped build with the isolated Debug signer
+bash android/build-cli.sh release
+
+# Official release build with external production signing
+bash android/build-cli.sh release \
+  --signing-properties /secure/TrustAttestor/keystore.properties \
+  --require-release-signing
 ```
 
-Both Debug and Release builds must use the external signing configuration that is used for the
-production package. This keeps the signer fingerprint identical across variants and prevents the
-native signer-identity gate from treating a Debug package as a different application.
+Use `--no-sdk-install` when CI or the host already has the pinned SDK packages, and `--build-root` to select another external build directory.
+
+Without a production keystore, the CLI creates an isolated JKS Debug certificate and Gradle embeds that selected certificate SHA-256 into native `APP_SIGNER_SHA256`. The APK signer and native identity gate therefore remain consistent. That signer is not expected in production `TRUSTED_SIGNER_DIGESTS`, so optional L3 cloud application-identity verification may return `WARNING` or `UNAVAILABLE`; L0–L2 local development remains usable.
+
+### Windows
+
+The PowerShell entry point also keeps all generated state outside the repository:
 
 ```powershell
-# Gradle state, project caches, Kotlin state, CMake staging, DEX, mappings,
-# and APKs are written to the external TrustAttestor-build directory.
-.\build-external.ps1 -Variant debug `
-  -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
-```
+# Contributor Debug build
+.\build-external.ps1 -Variant debug
 
-Release:
-
-```powershell
+# Official Release build
 .\build-external.ps1 -Variant release `
   -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
 ```
 
-Direct `gradlew.bat` invocations also default their Gradle user directory, temporary directory, and project cache to the external build root. Keep signing files and all generated artifacts outside the repository.
+Direct Gradle Wrapper invocations use the external build root as well. SDK paths may come from `ANDROID_SDK_ROOT` / `ANDROID_HOME` or machine-local `local.properties`; do not commit local paths, JKS files, or signing properties.
+
+GitHub Actions uses `.github/actions/setup-android-build/action.yml` to install the exact versions from `gradle.properties`. The PR `Android CI` workflow builds with the isolated Debug signer and runs host regressions. `Build Android APK` builds Debug on main and supports manually requested, secret-backed official Release builds.
 
 The project uses the standard Android Gradle Plugin R8/D8 pipeline. Skidfuscator, LSParanoid, OLLVM, and detector-embedded anti-debug configuration have been removed. The standalone anti-debug example is not part of this client.
 

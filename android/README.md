@@ -92,31 +92,48 @@ android/
 
 ## 兼容性与构建
 
-需要 JDK 17、Android SDK Platform 35、Build Tools 35.0.0（DEX 流程还会读取 35.0.1 的 `d8.jar`）、NDK 27.2.12479018 和 SDK 提供的 CMake。SDK 由 Android SDK 环境变量或 Android Studio 提供；`local.properties` 仅作为本机配置，不应提交。
+构建工具链版本统一固定在 [`gradle.properties`](gradle.properties)：JDK 17、Android SDK Platform 35、Build Tools 35.0.0、DEX/R8 Build Tools 35.0.1、NDK 27.2.12479018 和 CMake 3.22.1。Gradle 与 GitHub Actions 都读取同一组属性，避免本地和 CI 的工具版本漂移。
 
-```properties
-sdk.dir=/absolute/path/to/Android/Sdk
+### Linux / macOS CLI
+
+只需要 JDK 17、Android SDK command-line tools（含 `sdkmanager`）和 Git。脚本会检查并安装固定版本的 Platform、Build Tools、NDK 和 CMake，并把 Gradle/Kotlin/CMake/DEX/APK 状态放在仓库外：
+
+```bash
+git clone --recurse-submodules https://github.com/jepede/TrustAttestor.git
+cd TrustAttestor
+
+# 普通开发构建：自动使用仓库外隔离的 Debug JKS
+bash android/build-cli.sh debug
+
+# 本机 Release 形态测试，也可使用隔离 Debug 证书
+bash android/build-cli.sh release
+
+# 正式 Release：必须提供仓库外发布签名
+bash android/build-cli.sh release \
+  --signing-properties /secure/TrustAttestor/keystore.properties \
+  --require-release-signing
 ```
 
-Debug 和 Release 都必须使用仓库外、与正式包相同的签名配置。这样 Debug 包的签名指纹与 Release 一致，Native 签名身份检查不会因为构建类型不同而失效。
+如果 SDK 包已经由 CI 或系统提前安装，可增加 `--no-sdk-install`；`--build-root` 可指定其他仓库外构建目录。
 
-Debug：
+没有提供发布 keystore 时，脚本会生成独立 JKS Debug 证书，并让 Gradle 将该证书 SHA-256 写入 Native 的 `APP_SIGNER_SHA256`，因此 APK 实际签名与 Native 自校验仍一致。这个签名通常不在生产 `TRUSTED_SIGNER_DIGESTS` 中，所以 L3 云端应用身份验证可能返回 `WARNING` 或 `UNAVAILABLE`；L0–L2 本地开发与测试不受影响。
 
-```powershell
-# 所有 Gradle 用户状态、项目缓存、Kotlin 状态、CMake staging、DEX、映射和 APK
-# 都写入仓库外的 TrustAttestor-build（可用 -BuildRoot 覆盖）。
-.\build-external.ps1 -Variant debug `
-  -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
-```
+### Windows
 
-Release：
+PowerShell 入口同样把所有构建状态放在仓库外：
 
 ```powershell
+# 开发 Debug，无需私有发布证书
+.\build-external.ps1 -Variant debug
+
+# 正式 Release
 .\build-external.ps1 -Variant release `
   -SigningProperties 'C:\private\TrustAttestor\android\keystore.properties'
 ```
 
-也可以直接执行 `gradlew.bat`；包装脚本会自动将 Gradle 用户目录、临时目录和项目缓存指向外部构建根。不要把签名文件或 APK 放入仓库。
+直接执行 Gradle Wrapper 也使用外部构建根。SDK 可由 `ANDROID_SDK_ROOT` / `ANDROID_HOME` 或 `local.properties` 指定；不要提交本机路径、JKS 或 `keystore.properties`。
+
+GitHub Actions 使用 `.github/actions/setup-android-build/action.yml` 安装与 `gradle.properties` 完全一致的命令行工具链。PR 的 `Android CI` 工作流使用隔离 Debug 签名完成 APK 构建与 host regression；`Build Android APK` 在主分支自动构建 Debug，并允许手动使用仓库 Secrets 生成正式 Release。
 
 项目使用 Android Gradle Plugin 自带的标准 R8/D8 流程；Skidfuscator、LSParanoid、OLLVM 和检测器内嵌反调试配置已移除。独立反调试示例不属于此客户端，也不会被编译或加载。
 
