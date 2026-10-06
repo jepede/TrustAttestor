@@ -25,11 +25,11 @@ fun requiredGradleProperty(name: String): String =
     providers.gradleProperty(name).orNull
         ?: throw GradleException("Missing required Gradle property: $name")
 
-val compileSdkVersion = requiredGradleProperty("trustAttestor.android.compileSdk").toInt()
-val targetSdkVersion = requiredGradleProperty("trustAttestor.android.targetSdk").toInt()
-val minSdkVersion = requiredGradleProperty("trustAttestor.android.minSdk").toInt()
-val buildToolsVersionPinned = requiredGradleProperty("trustAttestor.android.buildTools")
-val cmakeVersionPinned = requiredGradleProperty("trustAttestor.android.cmake")
+val pinnedCompileSdk = requiredGradleProperty("trustAttestor.android.compileSdk").toInt()
+val pinnedTargetSdk = requiredGradleProperty("trustAttestor.android.targetSdk").toInt()
+val pinnedMinSdk = requiredGradleProperty("trustAttestor.android.minSdk").toInt()
+val pinnedBuildTools = requiredGradleProperty("trustAttestor.android.buildTools")
+val pinnedCmake = requiredGradleProperty("trustAttestor.android.cmake")
 val ndkVer: String? by project
 val effectiveNdkVersion = ndkVer ?: requiredGradleProperty("trustAttestor.android.ndk")
 val cloudAttestationUrl = providers.gradleProperty("trustAttestorCloudUrl").orNull.orEmpty()
@@ -126,9 +126,9 @@ val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
 
 android {
     namespace = "com.lingqing.trustattestor"
-    compileSdk = compileSdkVersion
+    compileSdk = pinnedCompileSdk
     ndkVersion = effectiveNdkVersion
-    buildToolsVersion = buildToolsVersionPinned
+    buildToolsVersion = pinnedBuildTools
 
     fun getSignerSha256(signConfig: ApkSigningConfig): String {
         val ks = KeyStore.getInstance("JKS")
@@ -166,8 +166,8 @@ android {
 
     defaultConfig {
         applicationId = "com.lingqing.trustattestor"
-        minSdk = minSdkVersion
-        targetSdk = targetSdkVersion
+        minSdk = pinnedMinSdk
+        targetSdk = pinnedTargetSdk
         versionCode = 15
         versionName = "v1.5"
         buildConfigField(
@@ -257,7 +257,7 @@ android {
 
     externalNativeBuild.cmake {
         path("src/main/cpp/CMakeLists.txt")
-        version = cmakeVersionPinned
+        version = pinnedCmake
         buildStagingDirectory = externalBuildRoot.resolve("native/app")
     }
     packaging {

@@ -6,15 +6,15 @@ fun requiredGradleProperty(name: String): String =
     providers.gradleProperty(name).orNull
         ?: throw GradleException("Missing required Gradle property: $name")
 
-val compileSdkVersion = requiredGradleProperty("trustAttestor.android.compileSdk").toInt()
-val minSdkVersion = requiredGradleProperty("trustAttestor.android.minSdk").toInt()
+val pinnedCompileSdk = requiredGradleProperty("trustAttestor.android.compileSdk").toInt()
+val pinnedMinSdk = requiredGradleProperty("trustAttestor.android.minSdk").toInt()
 
 android {
     namespace = "io.github.a13e300.stub"
-    compileSdk = compileSdkVersion
+    compileSdk = pinnedCompileSdk
 
     defaultConfig {
-        minSdk = minSdkVersion
+        minSdk = pinnedMinSdk
 
         consumerProguardFiles("consumer-rules.pro")
     }
