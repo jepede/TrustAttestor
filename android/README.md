@@ -116,6 +116,8 @@ CLI 会检查 Git submodule、JDK 和 Android SDK，并通过 `sdkmanager` 安�
 ./build-cli.sh release --signing-properties /secure/keystore.properties
 ```
 
+CLI 同时保留常用工程选项：`-v/--variant`、`-b/--build-root`、`-s/--signing-properties`、`--clean`、`--offline`、`--info`、`--init-submodules`，并可在 `--` 后透传额外 Gradle 参数。Linux、macOS 和 Termux 都可使用同一脚本；运行 `./build-cli.sh --help` 查看完整参数。
+
 GitHub Actions 使用相同的 `gradle.properties` 版本源和 CLI 入口，在干净的 Ubuntu runner 上自动准备工具链、构建 Debug APK、验证 APK 签名并上传 Artifact。
 
 也可以手工配置 SDK。SDK 由 Android SDK 环境变量或 Android Studio 提供；`local.properties` 仅作为本机配置，不应提交。

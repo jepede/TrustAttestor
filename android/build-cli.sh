@@ -7,10 +7,18 @@ Usage:
   ./build-cli.sh [debug|release] [options]
 
 Options:
-  --build-root PATH           External build directory.
-  --signing-properties PATH   External keystore.properties.
-  --skip-sdk-install          Do not run sdkmanager --install.
+  -v, --variant VARIANT       Build variant: debug or release (default: debug).
+  -b, --build-root PATH       External build directory.
+  -s, --signing-properties PATH
+                              External keystore.properties.
+      --skip-sdk-install      Do not run sdkmanager --install.
+      --clean                 Run Gradle clean before building.
+      --offline               Pass --offline to Gradle and skip SDK installation.
+      --info                  Pass --info to Gradle.
+      --stacktrace            Pass --stacktrace to Gradle.
+      --init-submodules       Force git submodule initialization/update.
   -h, --help                  Show this help.
+  --                          Pass remaining arguments directly to Gradle.
 
 Debug builds create an external development JKS when --signing-properties is omitted.
 Release builds always require --signing-properties.
@@ -24,8 +32,14 @@ fail() {
 
 variant="debug"
 build_root="${TRUST_ATTESTOR_BUILD_ROOT:-}"
-signing_properties=""
+signing_properties="${TRUST_ATTESTOR_SIGNING_PROPERTIES:-}"
 skip_sdk_install=false
+clean_first=false
+offline=false
+info=false
+stacktrace=true
+init_submodules=false
+gradle_extra=()
 
 if [[ $# -gt 0 && ( "$1" == "debug" || "$1" == "release" ) ]]; then
     variant="$1"
@@ -34,19 +48,54 @@ fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --build-root)
-            [[ $# -ge 2 ]] || fail "--build-root requires a path"
+        -v|--variant)
+            [[ $# -ge 2 ]] || fail "$1 requires a value"
+            variant="$2"
+            [[ "$variant" == "debug" || "$variant" == "release" ]] ||
+                fail "unsupported variant: $variant"
+            shift 2
+            ;;
+        -b|--build-root)
+            [[ $# -ge 2 ]] || fail "$1 requires a path"
             build_root="$2"
             shift 2
             ;;
-        --signing-properties)
-            [[ $# -ge 2 ]] || fail "--signing-properties requires a path"
+        -s|--signing-properties)
+            [[ $# -ge 2 ]] || fail "$1 requires a path"
             signing_properties="$2"
             shift 2
             ;;
         --skip-sdk-install)
             skip_sdk_install=true
             shift
+            ;;
+        --clean)
+            clean_first=true
+            shift
+            ;;
+        --offline)
+            offline=true
+            skip_sdk_install=true
+            shift
+            ;;
+        --info)
+            info=true
+            shift
+            ;;
+        --stacktrace)
+            stacktrace=true
+            shift
+            ;;
+        --init-submodules)
+            init_submodules=true
+            shift
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                gradle_extra+=("$1")
+                shift
+            done
             ;;
         -h|--help)
             usage
@@ -109,7 +158,10 @@ java_line="$(java -version 2>&1 | head -n 1)"
 java_major="$(printf '%s\n' "$java_line" | sed -n 's/.*version "\([0-9][0-9]*\).*/\1/p')"
 [[ "$java_major" == "$java_version" ]] || fail "expected Java $java_version, got: $java_line"
 
-git -C "$repo_root" submodule update --init --recursive
+fmt_dir="$script_dir/app/src/main/cpp/external/fmt"
+if [[ "$init_submodules" == true || ! -f "$fmt_dir/CMakeLists.txt" ]]; then
+    git -C "$repo_root" submodule update --init --recursive
+fi
 
 find_sdkmanager() {
     if command -v sdkmanager >/dev/null 2>&1; then
@@ -180,9 +232,31 @@ export TMP="$TEMP"
 export TMPDIR="$TEMP"
 mkdir -p "$GRADLE_USER_HOME" "$ANDROID_USER_HOME" "$TEMP" "$build_root/java-user"
 
+path_is_within_repo() {
+    local path="$1"
+    case "$path/" in
+        "$repo_root"/|"$repo_root"/*/) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [[ -n "$signing_properties" ]]; then
     signing_properties="$(cd -- "$(dirname -- "$signing_properties")" && pwd -P)/$(basename -- "$signing_properties")"
     [[ -f "$signing_properties" ]] || fail "signing properties file not found: $signing_properties"
+    path_is_within_repo "$signing_properties" &&
+        fail "signing properties must be outside the repository: $signing_properties"
+
+    keystore_value="$(sed -n 's/^[[:space:]]*androidStoreFile[[:space:]]*=[[:space:]]*//p' "$signing_properties" | tail -n 1 | tr -d '\r')"
+    [[ -n "$keystore_value" ]] || fail "androidStoreFile is missing from $signing_properties"
+    if [[ "$keystore_value" = /* ]]; then
+        keystore_path="$keystore_value"
+    else
+        keystore_path="$(dirname -- "$signing_properties")/$keystore_value"
+    fi
+    keystore_path="$(cd -- "$(dirname -- "$keystore_path")" && pwd -P)/$(basename -- "$keystore_path")"
+    [[ -f "$keystore_path" ]] || fail "signing keystore not found: $keystore_path"
+    path_is_within_repo "$keystore_path" &&
+        fail "signing keystore must be outside the repository: $keystore_path"
 else
     [[ "$variant" == "debug" ]] || fail "release builds require --signing-properties"
     signing_dir="$build_root/signing"
@@ -205,8 +279,21 @@ EOF
 fi
 
 variant_task="${variant^}"
+gradle_args=(
+    --no-daemon
+    --console=plain
+    "-PtrustAttestorBuildRoot=$build_root"
+    "-PtrustAttestorSigningProperties=$signing_properties"
+)
+[[ "$stacktrace" == true ]] && gradle_args+=(--stacktrace)
+[[ "$offline" == true ]] && gradle_args+=(--offline)
+[[ "$info" == true ]] && gradle_args+=(--info)
+
 pushd "$script_dir" >/dev/null
-./gradlew     --no-daemon     --console=plain     --stacktrace     "-PtrustAttestorBuildRoot=$build_root"     "-PtrustAttestorSigningProperties=$signing_properties"     :dex:check     ":app:assemble$variant_task"
+if [[ "$clean_first" == true ]]; then
+    ./gradlew "${gradle_args[@]}" clean "${gradle_extra[@]}"
+fi
+./gradlew "${gradle_args[@]}" :dex:check ":app:assemble$variant_task" "${gradle_extra[@]}"
 popd >/dev/null
 
 output_dir="$build_root/android/app/outputs/apk/$variant"

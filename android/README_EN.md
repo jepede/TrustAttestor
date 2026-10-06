@@ -102,6 +102,8 @@ Release still requires an explicit signing configuration outside the repository:
 ./build-cli.sh release --signing-properties /secure/keystore.properties
 ```
 
+The CLI also keeps the engineering controls from the original command-line builder: `-v/--variant`, `-b/--build-root`, `-s/--signing-properties`, `--clean`, `--offline`, `--info`, `--init-submodules`, plus arbitrary Gradle arguments after `--`. The same Bash entry point works on Linux, macOS, and Termux; run `./build-cli.sh --help` for the complete interface.
+
 GitHub Actions uses the same `gradle.properties` version source and CLI entry point to prepare a clean Ubuntu runner, build and verify the Debug APK, assert that no build state was written into the checkout, and upload the APK plus SHA-256 metadata.
 
 The SDK can also be configured manually through Android Studio or Android SDK environment variables; `local.properties` remains machine-local and must not be committed.
