@@ -1354,8 +1354,8 @@ void FindAPatch() {
         auto no_ap_pagefault = CheckTruncateMincore(kNoApAuthBranch);
         auto ap_pagefault = CheckTruncateMincore(kDoApAuthBranch);
         LOGI("no_ap_pagefault={} ap_pagefault={}",
-             no_ap_pagefault,
-             ap_pagefault);
+             static_cast<int>(no_ap_pagefault),
+             static_cast<int>(ap_pagefault));
         if (no_ap_pagefault == ERROR || ap_pagefault == ERROR) {
             MarkProbeUnavailable(0, "device.apatch.page_fault");
         }
