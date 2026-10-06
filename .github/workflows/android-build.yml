@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - cli-build
   pull_request:
   workflow_dispatch:
 
