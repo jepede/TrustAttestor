@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      TRUST_ATTESTOR_BUILD_ROOT: ${{ github.workspace }}/../TrustAttestor-build
+      TRUST_ATTESTOR_BUILD_ROOT: ${{ github.workspace }}-build
 
     steps:
       - name: Checkout repository
@@ -55,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: trustattestor-debug-${{ github.sha }}
-          path: ${{ github.workspace }}/../TrustAttestor-build/artifacts/
+          path: ${{ github.workspace }}-build/artifacts/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
