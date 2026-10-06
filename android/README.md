@@ -114,7 +114,7 @@ cd android
   --signing-properties /absolute/path/to/keystore.properties
 ```
 
-CLI 默认把 Gradle、Kotlin、CMake、DEX 和 APK 等构建状态写到仓库同级的 `TrustAttestor-build`，不会污染源码树。它会检查 JDK、外部签名配置和 `fmt` 子模块，并在成功后打印 APK 路径、文件大小和 SHA-256。首次克隆时可加 `--init-submodules` 自动初始化子模块；`--clean`、`--stacktrace`、`--offline`、`--info` 可直接控制常见构建行为，额外 Gradle 参数放在 `--` 之后。
+CLI 默认把 Gradle、Kotlin、CMake、DEX 和 APK 等构建状态写到仓库同级的 `TrustAttestor-build`，不会污染源码树。它会检查 JDK、外部签名配置和 `fmt` 子模块；构建完成后严格解析 AGP 的 `output-metadata.json` 选择最终 APK，再用 `keytool` 取得预期证书 SHA-256，并通过对应 Android Build Tools 的 `apksigner` 验证最终 APK 的真实签名。只有元数据、APK 文件和签名全部通过校验才会报告成功，并输出版本号、Git commit、APK 大小、APK SHA-256、Signer SHA-256 和构建耗时。首次克隆时可加 `--init-submodules` 自动初始化子模块；`--clean`、`--stacktrace`、`--offline`、`--info` 可直接控制常见构建行为，额外 Gradle 参数放在 `--` 之后。
 
 完整参数：
 
