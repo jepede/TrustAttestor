@@ -92,13 +92,39 @@ android/
 
 ## 兼容性与构建
 
-需要 JDK 17、Android SDK Platform 35、Build Tools 35.0.0（DEX 流程还会读取 35.0.1 的 `d8.jar`）、NDK 27.2.12479018 和 SDK 提供的 CMake。SDK 由 Android SDK 环境变量或 Android Studio 提供；`local.properties` 仅作为本机配置，不应提交。
+JDK、SDK、Build Tools、NDK 和 CMake 的固定版本统一记录在 `gradle.properties`。当前为 JDK 17、Android SDK Platform 35、Build Tools 35.0.0（嵌入 DEX 额外使用 35.0.1 的 `d8.jar`）、NDK 27.2.12479018 和 CMake 3.22.1。
+
+### CLI 自主构建
+
+Linux/macOS：
+
+```bash
+./build-cli.sh debug
+```
+
+Windows PowerShell：
+
+```powershell
+.\build-cli.ps1 -Variant debug
+```
+
+CLI 会检查 Git submodule、JDK 和 Android SDK，并通过 `sdkmanager` 安装缺失的 Platform、Build Tools、NDK 与 CMake。默认 Debug 构建如果没有指定签名配置，会在仓库外构建目录生成开发 JKS，并把同一证书的 SHA-256 注入 Native 签名身份校验，因此不会绕过应用自身的 signer 校验。该开发证书不是官方发布签名，生产 Cloud L3 不应信任它。
+
+正式 Release 仍然必须显式提供仓库外的签名配置：
+
+```bash
+./build-cli.sh release --signing-properties /secure/keystore.properties
+```
+
+GitHub Actions 使用相同的 `gradle.properties` 版本源和 CLI 入口，在干净的 Ubuntu runner 上自动准备工具链、构建 Debug APK、验证 APK 签名并上传 Artifact。
+
+也可以手工配置 SDK。SDK 由 Android SDK 环境变量或 Android Studio 提供；`local.properties` 仅作为本机配置，不应提交。
 
 ```properties
 sdk.dir=/absolute/path/to/Android/Sdk
 ```
 
-Debug 和 Release 都必须使用仓库外、与正式包相同的签名配置。这样 Debug 包的签名指纹与 Release 一致，Native 签名身份检查不会因为构建类型不同而失效。
+用于发布或与生产环境做等价验证的 Debug/Release 仍应使用仓库外、与正式包相同的签名配置。CLI 默认生成的 Debug 开发证书只用于自主构建和 CI；若要让 Debug 与正式包签名一致，请显式传入 `--signing-properties`。
 
 Debug：
 
