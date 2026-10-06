@@ -14,12 +14,12 @@ TrustAttestor 是一个 Android 设备可信度诊断项目。它将硬件证明
 ## 快速开始
 
 ```bash
-git clone --recurse-submodules https://github.com/LingQingBigKing/TrustAttestor.git
-cd TrustAttestor/android
-./gradlew :dex:check
+git clone --recurse-submodules https://github.com/jepede/TrustAttestor.git
+cd TrustAttestor
+bash android/build-cli.sh debug
 ```
 
-Windows 推荐使用 `android/build-external.ps1 -Variant debug -SigningProperties <仓库外的 keystore.properties>`；Debug 和 Release 都复用正式签名。该入口会把 Gradle 用户目录、项目缓存、临时目录、DEX、CMake 中间文件和 APK 全部放在仓库外。直接运行 `gradlew.bat` 也会采用同样的外部构建根。Android 的 JDK、SDK、NDK、CMake 和签名配置见 [Android README](android/README.md)。
+CLI 构建会读取 `android/gradle.properties` 中固定的 JDK/SDK/Build Tools/NDK/CMake 版本；在已有 Android command-line tools 的环境中，`sdkmanager` 会自动补齐缺失组件，不依赖 Android Studio。普通 Debug 构建无需私有签名，正式 Release 仍要求仓库外的发布 keystore。Windows 可使用 `android/build-external.ps1`。完整说明见 [Android README](android/README.md)。
 
 云端开发：
 

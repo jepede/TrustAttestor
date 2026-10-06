@@ -14,12 +14,12 @@ TrustAttestor is an Android device-trust diagnostics project for security resear
 ## Quick start
 
 ```bash
-git clone --recurse-submodules https://github.com/LingQingBigKing/TrustAttestor.git
-cd TrustAttestor/android
-./gradlew :dex:check
+git clone --recurse-submodules https://github.com/jepede/TrustAttestor.git
+cd TrustAttestor
+bash android/build-cli.sh debug
 ```
 
-On Windows, use `android/build-external.ps1 -Variant debug -SigningProperties <external keystore.properties>`; Debug and Release reuse the production signer. This entry point keeps the Gradle user home, project cache, temporary files, DEX, CMake intermediates, and APKs outside the checkout. Direct `gradlew.bat` invocations use the same external build root. Android requirements and signing are documented in the [Android README](android/README_EN.md). Cloud development starts with:
+The CLI reads pinned JDK/SDK/Build Tools/NDK/CMake versions from `android/gradle.properties` and can install missing SDK packages through `sdkmanager`, so Android Studio is not required. Contributor Debug builds use an isolated generated signer; official Release builds still require an external production keystore. Windows can use `android/build-external.ps1`. See the [Android README](android/README_EN.md). Cloud development starts with:
 
 ```bash
 cd cloud

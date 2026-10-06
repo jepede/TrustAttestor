@@ -52,7 +52,7 @@ set "TMPDIR=%TRUST_ATTESTOR_TEMP%"
 if defined JAVA_HOME set "TRUST_ATTESTOR_KEYTOOL=%JAVA_HOME%\bin\keytool.exe"
 if not defined TRUST_ATTESTOR_KEYTOOL set "TRUST_ATTESTOR_KEYTOOL=keytool.exe"
 if not exist "%ANDROID_USER_HOME%\debug.keystore" (
-    "%TRUST_ATTESTOR_KEYTOOL%" -genkeypair -keystore "%ANDROID_USER_HOME%\debug.keystore" -storepass android -keypass android -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 >NUL 2>&1
+    "%TRUST_ATTESTOR_KEYTOOL%" -genkeypair -keystore "%ANDROID_USER_HOME%\debug.keystore" -storepass android -keypass android -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 -storetype JKS >NUL 2>&1
 )
 if defined JAVA_TOOL_OPTIONS (
     set "JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS% -Duser.home="%TRUST_ATTESTOR_BUILD_ROOT%\java-user" -Djava.io.tmpdir="%TRUST_ATTESTOR_TEMP%""

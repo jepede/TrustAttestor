@@ -20,8 +20,19 @@ plugins {
 
 val androidSourceCompatibility: JavaVersion by rootProject.extra
 val androidTargetCompatibility: JavaVersion by rootProject.extra
+
+fun requiredGradleProperty(name: String): String =
+    providers.gradleProperty(name).orNull?.takeIf { it.isNotBlank() }
+        ?: error("Missing required Gradle property: $name")
+
+val configuredCompileSdk = requiredGradleProperty("trustattestor.android.compileSdk").toInt()
+val configuredTargetSdk = requiredGradleProperty("trustattestor.android.targetSdk").toInt()
+val configuredMinSdk = requiredGradleProperty("trustattestor.android.minSdk").toInt()
+val configuredBuildTools = requiredGradleProperty("trustattestor.android.buildTools")
+val configuredCmake = requiredGradleProperty("trustattestor.android.cmake")
+val configuredNdk = requiredGradleProperty("trustattestor.android.ndk")
 val ndkVer: String? by project
-val effectiveNdkVersion = ndkVer ?: "27.2.12479018"
+val effectiveNdkVersion = ndkVer ?: configuredNdk
 val cloudAttestationUrl = providers.gradleProperty("trustAttestorCloudUrl").orNull.orEmpty()
 val cloudVerdictPublicKey = providers.gradleProperty("trustAttestorCloudVerdictPublicKey").orNull.orEmpty()
 val configuredBuildRoot = providers.gradleProperty("trustAttestorBuildRoot").orNull
@@ -30,6 +41,14 @@ val configuredBuildRoot = providers.gradleProperty("trustAttestorBuildRoot").orN
         .resolve("${rootProject.projectDir.parentFile.name}-build")
         .absolutePath
 val externalBuildRoot = file(configuredBuildRoot).canonicalFile
+val fallbackDebugKeystore = (
+    System.getenv("ANDROID_USER_HOME")?.takeIf { it.isNotBlank() }?.let(::file)
+        ?: externalBuildRoot.resolve("android-user")
+).resolve("debug.keystore").canonicalFile
+val requireExternalReleaseSigning =
+    providers.gradleProperty("trustAttestorRequireReleaseSigning").orNull
+        ?.toBooleanStrictOrNull() ?: false
+
 fun buildConfigString(value: String): String = "\"" + value
     .replace("\\", "\\\\")
     .replace("\"", "\\\"") + "\""
@@ -48,10 +67,10 @@ configuredSigningProperties?.let { signingPath ->
     }.forEach { k, v -> project.ext[k.toString()] = v }
 }
 
-// Debug and release must use the same externally supplied production certificate. Keeping the
-// signing inputs explicit here also makes the signer hash embedded in native code identical for
-// both variants; falling back to the Android debug key would make a debug APK fail its own signer
-// identity check.
+// Prefer the externally supplied production certificate whenever present. Contributor/CLI builds
+// without private signing material use an isolated debug JKS under the external build root. The
+// selected certificate digest is still embedded into native code, so APK signing and
+// APP_SIGNER_SHA256 always describe the same signer.
 val externalSigningStoreFile = project.findProperty("androidStoreFile")?.toString()
     ?.let { file(it).canonicalFile }
 val externalSigningStorePassword = project.findProperty("androidStorePassword")?.toString()
@@ -116,9 +135,9 @@ val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
 
 android {
     namespace = "com.lingqing.trustattestor"
-    compileSdk = 35
+    compileSdk = configuredCompileSdk
     ndkVersion = effectiveNdkVersion
-    buildToolsVersion = "35.0.0"
+    buildToolsVersion = configuredBuildTools
 
     fun getSignerSha256(signConfig: ApkSigningConfig): String {
         val ks = KeyStore.getInstance("JKS")
@@ -140,6 +159,12 @@ android {
             enableV3Signing = false
             enableV4Signing = false
         }
+        getByName("debug") {
+            storeFile = fallbackDebugKeystore
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         if (externalSigningStoreFile != null) {
             create("releaseExternal") {
                 storeFile = externalSigningStoreFile
@@ -151,13 +176,18 @@ android {
                 enableV3Signing = false
                 enableV4Signing = false
             }
+        } else {
+            check(fallbackDebugKeystore.isFile) {
+                "CLI debug keystore is missing: $fallbackDebugKeystore. " +
+                    "Run the checked-in Gradle wrapper or build-cli.sh so it can be generated."
+            }
         }
     }
 
     defaultConfig {
         applicationId = "com.lingqing.trustattestor"
-        minSdk = 27
-        targetSdk = 35
+        minSdk = configuredMinSdk
+        targetSdk = configuredTargetSdk
         versionCode = 15
         versionName = "v1.5"
         buildConfigField(
@@ -197,16 +227,15 @@ android {
     }
 
     buildTypes {
-        val releaseSigning = signingConfigs.findByName("releaseExternal")
-            ?: throw GradleException(
-                "Debug and release builds require -PtrustAttestorSigningProperties "
-                        + "with the external release keystore."
+        val externalSigning = signingConfigs.findByName("releaseExternal")
+        val localDebugSigning = signingConfigs.getByName("debug")
+        if (requireExternalReleaseSigning && externalSigning == null) {
+            throw GradleException(
+                "This build requires -PtrustAttestorSigningProperties with the external release keystore."
             )
+        }
         debug {
-            // Deliberately use the production certificate for debuggable builds as well. This is
-            // required by the native signer identity gate and prevents debug/release fingerprints
-            // from describing different applications.
-            signingConfig = releaseSigning
+            signingConfig = externalSigning ?: localDebugSigning
             versionNameSuffix = "/Debug"
             externalNativeBuild.cmake {
                 cFlags += commonLinkerKeepFlags
@@ -214,7 +243,14 @@ android {
             }
         }
         release {
-            signingConfig = releaseSigning
+            signingConfig = externalSigning ?: localDebugSigning
+            if (externalSigning == null) {
+                logger.warn(
+                    "Release is signed with the isolated CLI debug certificate. " +
+                        "It is not an official TrustAttestor release and cloud application-identity " +
+                        "verification may not trust this signer."
+                )
+            }
             versionNameSuffix = "/Release"
             isMinifyEnabled = true
             externalNativeBuild.cmake {
@@ -247,6 +283,7 @@ android {
 
     externalNativeBuild.cmake {
         path("src/main/cpp/CMakeLists.txt")
+        version = configuredCmake
         buildStagingDirectory = externalBuildRoot.resolve("native/app")
     }
     packaging {

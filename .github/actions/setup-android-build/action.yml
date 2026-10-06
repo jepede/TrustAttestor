@@ -1,0 +1,111 @@
+name: Set up TrustAttestor Android build
+description: Install the JDK and exact Android SDK packages pinned by android/gradle.properties.
+
+inputs:
+  cache-read-only:
+    description: Restore Gradle caches without writing new entries.
+    required: false
+    default: "true"
+
+outputs:
+  build-tools:
+    value: ${{ steps.toolchain.outputs.build_tools }}
+  d8-build-tools:
+    value: ${{ steps.toolchain.outputs.d8_build_tools }}
+  cmake:
+    value: ${{ steps.toolchain.outputs.cmake }}
+  compile-sdk:
+    value: ${{ steps.toolchain.outputs.compile_sdk }}
+  ndk:
+    value: ${{ steps.toolchain.outputs.ndk }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read pinned toolchain versions
+      id: toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - <<'PY' >> "$GITHUB_OUTPUT"
+        from pathlib import Path
+
+        properties = {}
+        for raw in Path("android/gradle.properties").read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            properties[key.strip()] = value.strip()
+
+        mapping = {
+            "java": "trustattestor.java.version",
+            "build_tools": "trustattestor.android.buildTools",
+            "d8_build_tools": "trustattestor.android.d8BuildTools",
+            "cmake": "trustattestor.android.cmake",
+            "compile_sdk": "trustattestor.android.compileSdk",
+            "ndk": "trustattestor.android.ndk",
+        }
+        for output, key in mapping.items():
+            value = properties.get(key)
+            if not value:
+                raise SystemExit(f"Missing required Gradle property: {key}")
+            print(f"{output}={value}")
+        PY
+
+    - name: Set up Java
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        distribution: temurin
+        java-version: ${{ steps.toolchain.outputs.java }}
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      with:
+        cache-read-only: ${{ inputs.cache-read-only }}
+
+    - name: Size Gradle for the hosted runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        gradle_user_home="${GRADLE_USER_HOME:-$HOME/.gradle}"
+        mkdir -p "$gradle_user_home"
+        cat >> "$gradle_user_home/gradle.properties" <<'EOF'
+        org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1536m -Dfile.encoding=UTF-8
+        kotlin.daemon.jvm.options=-Xmx2g
+        org.gradle.workers.max=2
+        EOF
+
+    - name: Set up Android command-line tools
+      uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      with:
+        packages: platform-tools
+
+    - name: Install pinned Android SDK packages
+      shell: bash
+      env:
+        BUILD_TOOLS: ${{ steps.toolchain.outputs.build_tools }}
+        D8_BUILD_TOOLS: ${{ steps.toolchain.outputs.d8_build_tools }}
+        CMAKE: ${{ steps.toolchain.outputs.cmake }}
+        COMPILE_SDK: ${{ steps.toolchain.outputs.compile_sdk }}
+        NDK: ${{ steps.toolchain.outputs.ndk }}
+      run: |
+        set -euo pipefail
+        packages=(
+          "platform-tools"
+          "platforms;android-${COMPILE_SDK}"
+          "build-tools;${BUILD_TOOLS}"
+          "build-tools;${D8_BUILD_TOOLS}"
+          "cmake;${CMAKE}"
+          "ndk;${NDK}"
+        )
+        for attempt in 1 2 3; do
+          if sdkmanager --install "${packages[@]}"; then
+            exit 0
+          fi
+          if [ "$attempt" -eq 3 ]; then
+            echo "Android SDK package installation failed after $attempt attempts." >&2
+            exit 1
+          fi
+          sleep $((attempt * 5))
+        done

@@ -19,9 +19,6 @@ if ($BuildRoot.TrimEnd('\', '/') -eq $repoRoot.TrimEnd('\', '/') -or
     throw "BuildRoot must be outside the repository: $BuildRoot"
 }
 
-if ([string]::IsNullOrWhiteSpace($SigningProperties)) {
-    throw "${Variant} builds require -SigningProperties pointing to the external release keystore.properties file."
-}
 if ($SigningProperties) {
     $SigningProperties = [IO.Path]::GetFullPath($SigningProperties)
     if (-not (Test-Path -LiteralPath $SigningProperties -PathType Leaf)) {
@@ -52,6 +49,11 @@ $arguments = @(
 )
 if ($SigningProperties) {
     $arguments += "-PtrustAttestorSigningProperties=$SigningProperties"
+    if ($Variant -eq 'release') {
+        $arguments += '-PtrustAttestorRequireReleaseSigning=true'
+    }
+} elseif ($Variant -eq 'release') {
+    Write-Warning 'Release will use the isolated CLI debug certificate and is not an official release.'
 }
 $arguments += ":app:assemble$($Variant.Substring(0, 1).ToUpperInvariant())$($Variant.Substring(1))"
 

@@ -1,0 +1,119 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: APK variant to build
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Android build toolchain
+        uses: ./.github/actions/setup-android-build
+        with:
+          cache-read-only: ${{ github.ref_name != github.event.repository.default_branch }}
+
+      - name: Resolve build variant
+        id: variant
+        shell: bash
+        env:
+          REQUESTED_VARIANT: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            variant="${REQUESTED_VARIANT:-debug}"
+          else
+            variant="debug"
+          fi
+          case "$variant" in
+            debug|release) ;;
+            *) echo "Unsupported variant: $variant" >&2; exit 2 ;;
+          esac
+          echo "value=$variant" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release signing
+        id: signing
+        if: steps.variant.outputs.value == 'release'
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "Release builds require secret $name." >&2
+              exit 1
+            fi
+          done
+
+          keystore="$RUNNER_TEMP/trustattestor-release.jks"
+          properties="$RUNNER_TEMP/trustattestor-keystore.properties"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          test -s "$keystore"
+          chmod 600 "$keystore"
+
+          {
+            printf 'androidStoreFile=%s\n' "$keystore"
+            printf 'androidStorePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'androidKeyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'androidKeyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > "$properties"
+          chmod 600 "$properties"
+          echo "properties=$properties" >> "$GITHUB_OUTPUT"
+
+      - name: Build APK through the CLI entry point
+        id: build
+        shell: bash
+        env:
+          VARIANT: ${{ steps.variant.outputs.value }}
+          SIGNING_PROPERTIES: ${{ steps.signing.outputs.properties }}
+        run: |
+          set -euo pipefail
+          args=(
+            "$VARIANT"
+            --no-sdk-install
+            --build-root "$RUNNER_TEMP/trustattestor-build"
+          )
+          if [ "$VARIANT" = "release" ]; then
+            args+=(--signing-properties "$SIGNING_PROPERTIES" --require-release-signing)
+          fi
+          bash android/build-cli.sh "${args[@]}"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: TrustAttestor-${{ steps.build.outputs.variant }}-${{ github.sha }}
+          path: ${{ steps.build.outputs.apk_path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
