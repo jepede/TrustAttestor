@@ -7,6 +7,14 @@ plugins {
     id("com.android.application")
 }
 
+fun requiredGradleProperty(name: String): String =
+    providers.gradleProperty(name).orNull
+        ?: throw GradleException("Missing required Gradle property: $name")
+
+val pinnedCompileSdk = requiredGradleProperty("trustAttestor.android.compileSdk").toInt()
+val pinnedMinSdk = requiredGradleProperty("trustAttestor.android.minSdk").toInt()
+val pinnedD8BuildTools = requiredGradleProperty("trustAttestor.android.d8BuildTools")
+
 fun javaStringLiteral(s: String): String {
     val out = StringBuilder(s.length + 32)
     out.append('"')
@@ -123,11 +131,11 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 
 android {
     namespace = "com.lingqing.trustattestor"
-    compileSdk = 35
+    compileSdk = pinnedCompileSdk
     sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/source/revocationList/java"))
 
     defaultConfig {
-        minSdk = 27
+        minSdk = pinnedMinSdk
         multiDexEnabled = false
         proguardFiles("proguard-rules.pro")
     }
@@ -169,8 +177,12 @@ dependencies {
 
 // Build the embedded payload with the standard Android R8 toolchain.
 val androidSdkDirectory = androidComponents.sdkComponents.sdkDirectory
-val androidPlatformJar = androidSdkDirectory.map { it.file("platforms/android-35/android.jar") }
-val d8Jar = androidSdkDirectory.map { it.file("build-tools/35.0.1/lib/d8.jar") }
+val androidPlatformJar = androidSdkDirectory.map {
+    it.file("platforms/android-$pinnedCompileSdk/android.jar")
+}
+val d8Jar = androidSdkDirectory.map {
+    it.file("build-tools/$pinnedD8BuildTools/lib/d8.jar")
+}
 
 fun File.isClassPathEntry(): Boolean = isDirectory || extension.equals("jar", ignoreCase = true)
 
@@ -240,7 +252,7 @@ afterEvaluate {
                 "-cp", r8.absolutePath,
                 "com.android.tools.r8.R8",
                 "--debug",
-                "--min-api", "27",
+                "--min-api", pinnedMinSdk.toString(),
                 "--no-data-resources",
                 "--lib", androidJar.absolutePath,
                 "--lib", stubJar.asFile.absolutePath,

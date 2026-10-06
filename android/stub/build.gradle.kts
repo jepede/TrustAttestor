@@ -2,12 +2,19 @@ plugins {
     id("com.android.library")
 }
 
+fun requiredGradleProperty(name: String): String =
+    providers.gradleProperty(name).orNull
+        ?: throw GradleException("Missing required Gradle property: $name")
+
+val pinnedCompileSdk = requiredGradleProperty("trustAttestor.android.compileSdk").toInt()
+val pinnedMinSdk = requiredGradleProperty("trustAttestor.android.minSdk").toInt()
+
 android {
     namespace = "io.github.a13e300.stub"
-    compileSdk = 35
+    compileSdk = pinnedCompileSdk
 
     defaultConfig {
-        minSdk = 27
+        minSdk = pinnedMinSdk
 
         consumerProguardFiles("consumer-rules.pro")
     }

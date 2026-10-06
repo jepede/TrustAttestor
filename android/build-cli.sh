@@ -1,256 +1,349 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd -P)"
-DEFAULT_BUILD_ROOT="$(cd -- "$REPO_ROOT/.." >/dev/null 2>&1 && pwd -P)/$(basename -- "$REPO_ROOT")-build"
-
-variant="release"
-build_root="${TRUST_ATTESTOR_BUILD_ROOT:-$DEFAULT_BUILD_ROOT}"
-signing_properties="${TRUST_ATTESTOR_SIGNING_PROPERTIES:-}"
-clean_first=0
-stacktrace=0
-offline=0
-info=0
-init_submodules=0
-gradle_extra=()
+set -euo pipefail
 
 usage() {
-    cat <<'USAGE'
-TrustAttestor Android CLI builder
-
+    cat <<'EOF'
 Usage:
-  ./build-cli.sh [options] [-- <extra Gradle args>]
+  ./build-cli.sh [debug|release] [options]
 
 Options:
-  -v, --variant <debug|release>       Build variant (default: release)
-  -s, --signing-properties <file>     External keystore.properties file
-  -b, --build-root <dir>              External build root
-      --clean                         Run Gradle clean before building
-      --stacktrace                    Enable Gradle stack traces
-      --offline                       Run Gradle in offline mode
-      --info                          Enable Gradle --info logging
-      --init-submodules               Run git submodule update --init --recursive
-  -h, --help                          Show this help
+  -v, --variant VARIANT       Build variant: debug or release (default: debug).
+  -b, --build-root PATH       External build directory.
+  -s, --signing-properties PATH
+                              External keystore.properties.
+      --skip-sdk-install      Do not run sdkmanager --install.
+      --clean                 Run Gradle clean before building.
+      --offline               Pass --offline to Gradle and skip SDK installation.
+      --info                  Pass --info to Gradle.
+      --stacktrace            Pass --stacktrace to Gradle.
+      --init-submodules       Force git submodule initialization/update.
+  -h, --help                  Show this help.
+  --                          Pass remaining arguments directly to Gradle.
 
-Environment:
-  TRUST_ATTESTOR_BUILD_ROOT
-  TRUST_ATTESTOR_SIGNING_PROPERTIES
-  ANDROID_SDK_ROOT / ANDROID_HOME
-  JAVA_HOME
-
-Examples:
-  ./build-cli.sh -v release -s /private/TrustAttestor/keystore.properties
-  ./build-cli.sh -v debug -s /private/TrustAttestor/keystore.properties --stacktrace
-  ./build-cli.sh -s /private/TrustAttestor/keystore.properties -- -PndkVer=27.2.12479018
-USAGE
+Debug builds create an external development JKS when --signing-properties is omitted.
+Release builds always require --signing-properties.
+EOF
 }
 
-die() {
-    printf 'error: %s\n' "$*" >&2
+fail() {
+    echo "error: $*" >&2
     exit 1
 }
 
-note() {
-    printf '[TrustAttestor] %s\n' "$*"
-}
+variant="debug"
+build_root="${TRUST_ATTESTOR_BUILD_ROOT:-}"
+signing_properties="${TRUST_ATTESTOR_SIGNING_PROPERTIES:-}"
+skip_sdk_install=false
+clean_first=false
+offline=false
+info=false
+stacktrace=true
+init_submodules=false
+gradle_extra=()
 
-canonical_existing_file() {
-    local input="$1"
-    local parent base
-    [ -f "$input" ] || return 1
-    parent="$(cd -- "$(dirname -- "$input")" >/dev/null 2>&1 && pwd -P)" || return 1
-    base="$(basename -- "$input")"
-    printf '%s/%s\n' "$parent" "$base"
-}
+if [[ $# -gt 0 && ( "$1" == "debug" || "$1" == "release" ) ]]; then
+    variant="$1"
+    shift
+fi
 
-canonical_dir_create() {
-    local input="$1"
-    mkdir -p -- "$input"
-    (cd -- "$input" >/dev/null 2>&1 && pwd -P)
-}
-
-path_is_within_repo() {
-    local path="$1"
-    case "$path/" in
-        "$REPO_ROOT"/|"$REPO_ROOT"/*/) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-while (($#)); do
+while [[ $# -gt 0 ]]; do
     case "$1" in
         -v|--variant)
-            (($# >= 2)) || die "$1 requires a value"
+            [[ $# -ge 2 ]] || fail "$1 requires a value"
             variant="$2"
-            shift 2
-            ;;
-        -s|--signing-properties)
-            (($# >= 2)) || die "$1 requires a value"
-            signing_properties="$2"
+            [[ "$variant" == "debug" || "$variant" == "release" ]] ||
+                fail "unsupported variant: $variant"
             shift 2
             ;;
         -b|--build-root)
-            (($# >= 2)) || die "$1 requires a value"
+            [[ $# -ge 2 ]] || fail "$1 requires a path"
             build_root="$2"
             shift 2
             ;;
-        --clean)
-            clean_first=1
+        -s|--signing-properties)
+            [[ $# -ge 2 ]] || fail "$1 requires a path"
+            signing_properties="$2"
+            shift 2
+            ;;
+        --skip-sdk-install)
+            skip_sdk_install=true
             shift
             ;;
-        --stacktrace)
-            stacktrace=1
+        --clean)
+            clean_first=true
             shift
             ;;
         --offline)
-            offline=1
+            offline=true
+            skip_sdk_install=true
             shift
             ;;
         --info)
-            info=1
+            info=true
+            shift
+            ;;
+        --stacktrace)
+            stacktrace=true
             shift
             ;;
         --init-submodules)
-            init_submodules=1
+            init_submodules=true
             shift
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                gradle_extra+=("$1")
+                shift
+            done
             ;;
         -h|--help)
             usage
             exit 0
             ;;
-        --)
-            shift
-            while (($#)); do
-                gradle_extra+=("$1")
-                shift
-            done
-            ;;
         *)
-            die "unknown argument: $1 (use --help)"
+            fail "unknown argument: $1"
             ;;
     esac
 done
 
-case "$variant" in
-    debug|release) ;;
-    *) die "unsupported variant '$variant'; expected debug or release" ;;
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd -- "$script_dir/.." && pwd -P)"
+
+if [[ -z "$build_root" ]]; then
+    build_root="$(dirname -- "$repo_root")/$(basename -- "$repo_root")-build"
+fi
+mkdir -p "$build_root"
+build_root="$(cd -- "$build_root" && pwd -P)"
+
+case "$build_root" in
+    "$repo_root"|"$repo_root"/*)
+        fail "build root must be outside the repository: $build_root"
+        ;;
 esac
 
-command -v git >/dev/null 2>&1 || die "git is required"
-command -v java >/dev/null 2>&1 || die "JDK 17 is required; java was not found in PATH"
+properties_file="$script_dir/gradle.properties"
+read_property() {
+    local key="$1"
+    awk -F= -v wanted="$key" '
+        {
+            key = $1
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            if (key == wanted) {
+                sub(/^[^=]*=/, "")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+                print
+                exit
+            }
+        }
+    ' "$properties_file"
+}
 
-java_version_output="$(java -version 2>&1 | head -n 1)"
-java_major="$(printf '%s\n' "$java_version_output" | sed -nE 's/.*version "([0-9]+)(\.[0-9]+)?.*/\1/p')"
-if [ -n "$java_major" ] && [ "$java_major" -lt 17 ]; then
-    die "JDK 17 or newer is required; detected: $java_version_output"
+java_version="$(read_property trustAttestor.java.version)"
+compile_sdk="$(read_property trustAttestor.android.compileSdk)"
+build_tools="$(read_property trustAttestor.android.buildTools)"
+d8_build_tools="$(read_property trustAttestor.android.d8BuildTools)"
+ndk_version="$(read_property trustAttestor.android.ndk)"
+cmake_version="$(read_property trustAttestor.android.cmake)"
+
+for value_name in java_version compile_sdk build_tools d8_build_tools ndk_version cmake_version; do
+    [[ -n "${!value_name}" ]] || fail "missing toolchain property: $value_name"
+done
+
+command -v git >/dev/null 2>&1 || fail "git is required"
+command -v java >/dev/null 2>&1 || fail "Java $java_version is required"
+command -v keytool >/dev/null 2>&1 || fail "keytool is required"
+
+java_line="$(java -version 2>&1 | head -n 1)"
+java_major="$(printf '%s\n' "$java_line" | sed -n 's/.*version "\([0-9][0-9]*\).*/\1/p')"
+[[ "$java_major" == "$java_version" ]] || fail "expected Java $java_version, got: $java_line"
+
+fmt_dir="$script_dir/app/src/main/cpp/external/fmt"
+if [[ "$init_submodules" == true || ! -f "$fmt_dir/CMakeLists.txt" ]]; then
+    git -C "$repo_root" submodule update --init --recursive
 fi
 
-build_root="$(canonical_dir_create "$build_root")" || die "cannot create build root: $build_root"
-path_is_within_repo "$build_root" && die "build root must be outside the repository: $build_root"
-
-[ -n "$signing_properties" ] || die \
-    "$variant builds require --signing-properties or TRUST_ATTESTOR_SIGNING_PROPERTIES"
-signing_properties="$(canonical_existing_file "$signing_properties")" || die \
-    "signing properties file does not exist: $signing_properties"
-path_is_within_repo "$signing_properties" && die \
-    "signing properties must be outside the repository: $signing_properties"
-
-keystore_value="$(sed -n 's/^[[:space:]]*androidStoreFile[[:space:]]*=[[:space:]]*//p' "$signing_properties" | tail -n 1 | tr -d '\r')"
-[ -n "$keystore_value" ] || die "androidStoreFile is missing from $signing_properties"
-case "$keystore_value" in
-    /*) keystore_path="$keystore_value" ;;
-    *) keystore_path="$(dirname -- "$signing_properties")/$keystore_value" ;;
-esac
-keystore_path="$(canonical_existing_file "$keystore_path")" || die \
-    "signing keystore does not exist: $keystore_path"
-path_is_within_repo "$keystore_path" && die \
-    "signing keystore must be outside the repository: $keystore_path"
-
-fmt_dir="$SCRIPT_DIR/app/src/main/cpp/external/fmt"
-if [ ! -f "$fmt_dir/CMakeLists.txt" ]; then
-    if ((init_submodules)); then
-        note "Initializing git submodules..."
-        git -C "$REPO_ROOT" submodule update --init --recursive
-    else
-        die "fmt submodule is not initialized; run with --init-submodules or execute: git submodule update --init --recursive"
+find_sdkmanager() {
+    if command -v sdkmanager >/dev/null 2>&1; then
+        command -v sdkmanager
+        return 0
     fi
+    local roots=()
+    [[ -n "${ANDROID_SDK_ROOT:-}" ]] && roots+=("$ANDROID_SDK_ROOT")
+    [[ -n "${ANDROID_HOME:-}" ]] && roots+=("$ANDROID_HOME")
+    roots+=("$HOME/Android/Sdk")
+    local root candidate
+    for root in "${roots[@]}"; do
+        for candidate in             "$root/cmdline-tools/latest/bin/sdkmanager"             "$root/cmdline-tools/bin/sdkmanager"             "$root/tools/bin/sdkmanager"; do
+            if [[ -x "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+sdkmanager_path="$(find_sdkmanager)" || fail "sdkmanager not found; install Android SDK command-line tools or use the GitHub Actions workflow"
+
+if [[ -n "${ANDROID_SDK_ROOT:-}" ]]; then
+    sdk_root="$ANDROID_SDK_ROOT"
+elif [[ -n "${ANDROID_HOME:-}" ]]; then
+    sdk_root="$ANDROID_HOME"
+elif [[ "$sdkmanager_path" == */cmdline-tools/*/bin/sdkmanager ]]; then
+    sdk_root="${sdkmanager_path%%/cmdline-tools/*}"
+elif [[ "$sdkmanager_path" == */tools/bin/sdkmanager ]]; then
+    sdk_root="${sdkmanager_path%%/tools/bin/sdkmanager}"
+else
+    fail "cannot derive Android SDK root from: $sdkmanager_path"
+fi
+sdk_root="$(cd -- "$sdk_root" && pwd -P)"
+export ANDROID_SDK_ROOT="$sdk_root"
+export ANDROID_HOME="$sdk_root"
+
+if [[ "$skip_sdk_install" != true ]]; then
+    yes | "$sdkmanager_path" --licenses >/dev/null 2>&1 || true
+    packages=(
+        "platform-tools"
+        "platforms;android-$compile_sdk"
+        "build-tools;$build_tools"
+        "ndk;$ndk_version"
+        "cmake;$cmake_version"
+    )
+    if [[ "$d8_build_tools" != "$build_tools" ]]; then
+        packages+=("build-tools;$d8_build_tools")
+    fi
+
+    for attempt in 1 2 3; do
+        if "$sdkmanager_path" --install "${packages[@]}"; then
+            break
+        fi
+        [[ "$attempt" -lt 3 ]] || fail "Android SDK package installation failed after $attempt attempts"
+        sleep $((attempt * 5))
+    done
 fi
 
+export PATH="$ANDROID_SDK_ROOT/cmake/$cmake_version/bin:$PATH"
 export TRUST_ATTESTOR_BUILD_ROOT="$build_root"
-export TRUST_ATTESTOR_SIGNING_PROPERTIES="$signing_properties"
 export GRADLE_USER_HOME="$build_root/gradle-user"
 export ANDROID_USER_HOME="$build_root/android-user"
 export TEMP="$build_root/temp"
 export TMP="$TEMP"
 export TMPDIR="$TEMP"
-mkdir -p -- "$GRADLE_USER_HOME" "$ANDROID_USER_HOME" "$TEMP" "$build_root/java-user"
+mkdir -p "$GRADLE_USER_HOME" "$ANDROID_USER_HOME" "$TEMP" "$build_root/java-user"
 
+path_is_within_repo() {
+    local path="$1"
+    case "$path/" in
+        "$repo_root"/|"$repo_root"/*/) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [[ -n "$signing_properties" ]]; then
+    signing_properties="$(cd -- "$(dirname -- "$signing_properties")" && pwd -P)/$(basename -- "$signing_properties")"
+    [[ -f "$signing_properties" ]] || fail "signing properties file not found: $signing_properties"
+    path_is_within_repo "$signing_properties" &&
+        fail "signing properties must be outside the repository: $signing_properties"
+
+    keystore_value="$(sed -n 's/^[[:space:]]*androidStoreFile[[:space:]]*=[[:space:]]*//p' "$signing_properties" | tail -n 1 | tr -d '\r')"
+    [[ -n "$keystore_value" ]] || fail "androidStoreFile is missing from $signing_properties"
+    if [[ "$keystore_value" = /* ]]; then
+        keystore_path="$keystore_value"
+    else
+        keystore_path="$(dirname -- "$signing_properties")/$keystore_value"
+    fi
+    keystore_path="$(cd -- "$(dirname -- "$keystore_path")" && pwd -P)/$(basename -- "$keystore_path")"
+    [[ -f "$keystore_path" ]] || fail "signing keystore not found: $keystore_path"
+    path_is_within_repo "$keystore_path" &&
+        fail "signing keystore must be outside the repository: $keystore_path"
+else
+    [[ "$variant" == "debug" ]] || fail "release builds require --signing-properties"
+    signing_dir="$build_root/signing"
+    mkdir -p "$signing_dir"
+    development_keystore="$signing_dir/cli-debug.jks"
+    signing_properties="$signing_dir/cli-debug.properties"
+
+    if [[ ! -s "$development_keystore" ]]; then
+        keytool -genkeypair             -storetype JKS             -keystore "$development_keystore"             -storepass android             -keypass android             -alias androiddebugkey             -dname "CN=TrustAttestor CLI Debug,O=TrustAttestor,C=US"             -keyalg RSA             -keysize 2048             -validity 10000             >/dev/null
+        chmod 600 "$development_keystore"
+    fi
+
+    cat > "$signing_properties" <<EOF
+androidStoreFile=$development_keystore
+androidStorePassword=android
+androidKeyAlias=androiddebugkey
+androidKeyPassword=android
+EOF
+    chmod 600 "$signing_properties"
+fi
+
+variant_task="${variant^}"
 gradle_args=(
     --no-daemon
     --console=plain
     "-PtrustAttestorBuildRoot=$build_root"
     "-PtrustAttestorSigningProperties=$signing_properties"
 )
-((stacktrace)) && gradle_args+=(--stacktrace)
-((offline)) && gradle_args+=(--offline)
-((info)) && gradle_args+=(--info)
+[[ "$stacktrace" == true ]] && gradle_args+=(--stacktrace)
+[[ "$offline" == true ]] && gradle_args+=(--offline)
+[[ "$info" == true ]] && gradle_args+=(--info)
 
-case "$variant" in
-    debug) assemble_task=":app:assembleDebug" ;;
-    release) assemble_task=":app:assembleRelease" ;;
-esac
-
-note "Variant: $variant"
-note "Repository: $REPO_ROOT"
-note "Build root: $build_root"
-note "Signing properties: $signing_properties"
-note "Java: $java_version_output"
-if [ -n "${ANDROID_SDK_ROOT:-}" ]; then
-    note "Android SDK: $ANDROID_SDK_ROOT"
-elif [ -n "${ANDROID_HOME:-}" ]; then
-    note "Android SDK: $ANDROID_HOME"
-fi
-
-cd -- "$SCRIPT_DIR"
-
-if ((clean_first)); then
-    note "Cleaning external Gradle outputs..."
+pushd "$script_dir" >/dev/null
+if [[ "$clean_first" == true ]]; then
     ./gradlew "${gradle_args[@]}" clean "${gradle_extra[@]}"
 fi
+./gradlew "${gradle_args[@]}" :dex:check ":app:assemble$variant_task" "${gradle_extra[@]}"
+popd >/dev/null
 
-note "Running $assemble_task ..."
-./gradlew "${gradle_args[@]}" "$assemble_task" "${gradle_extra[@]}"
+output_dir="$build_root/android/app/outputs/apk/$variant"
+[[ -d "$output_dir" ]] || fail "APK output directory not found: $output_dir"
 
-unexpected_state="$(find "$REPO_ROOT" -type d \( -name build -o -name .gradle -o -name .kotlin -o -name .cxx \) -print -quit 2>/dev/null || true)"
-[ -z "$unexpected_state" ] || die "build state was created inside the repository: $unexpected_state"
+apk_count="$(find "$output_dir" -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d '[:space:]')"
+[[ "$apk_count" == "1" ]] || fail "expected exactly one APK in $output_dir, found $apk_count"
+apk_path="$(find "$output_dir" -maxdepth 1 -type f -name '*.apk' -print -quit)"
 
-apk_dir="$build_root/android/app/outputs/apk/$variant"
-apk_path=""
-if [ -d "$apk_dir" ]; then
-    while IFS= read -r candidate; do
-        apk_path="$candidate"
-    done < <(find "$apk_dir" -maxdepth 1 -type f -name '*.apk' -print | sort)
-fi
-[ -n "$apk_path" ] && [ -f "$apk_path" ] || die "build succeeded but no APK was found under: $apk_dir"
+apksigner="$ANDROID_SDK_ROOT/build-tools/$build_tools/apksigner"
+[[ -x "$apksigner" ]] || fail "apksigner not found: $apksigner"
+apksigner_output="$("$apksigner" verify --print-certs "$apk_path")"
+printf '%s\n' "$apksigner_output"
+
+signer_sha256="$(printf '%s\n' "$apksigner_output" |
+    sed -n 's/^[[:space:]]*Signer #1 certificate SHA-256 digest:[[:space:]]*//p' |
+    head -n 1 |
+    tr -d '[:space:]:' |
+    tr '[:upper:]' '[:lower:]')"
+[[ -n "$signer_sha256" ]] || fail "could not extract APK signer SHA-256"
 
 if command -v sha256sum >/dev/null 2>&1; then
     apk_sha256="$(sha256sum "$apk_path" | awk '{print $1}')"
 elif command -v shasum >/dev/null 2>&1; then
     apk_sha256="$(shasum -a 256 "$apk_path" | awk '{print $1}')"
 else
-    apk_sha256="unavailable"
+    fail "sha256sum or shasum is required"
 fi
 
-if command -v stat >/dev/null 2>&1 && stat -c '%s' "$apk_path" >/dev/null 2>&1; then
-    apk_size="$(stat -c '%s' "$apk_path")"
-elif command -v stat >/dev/null 2>&1; then
-    apk_size="$(stat -f '%z' "$apk_path")"
-else
-    apk_size="unknown"
-fi
+artifact_dir="$build_root/artifacts"
+mkdir -p "$artifact_dir"
+artifact_apk="$artifact_dir/$(basename -- "$apk_path")"
+cp -f "$apk_path" "$artifact_apk"
+printf '%s  %s\n' "$apk_sha256" "$(basename -- "$artifact_apk")" > "$artifact_dir/SHA256SUMS.txt"
+cat > "$artifact_dir/BUILD-INFO.txt" <<EOF
+variant=$variant
+abi=arm64-v8a
+compileSdk=$compile_sdk
+buildTools=$build_tools
+d8BuildTools=$d8_build_tools
+ndk=$ndk_version
+cmake=$cmake_version
+signerSha256=$signer_sha256
+apkSha256=$apk_sha256
+apk=$artifact_apk
+EOF
 
-printf '\nBuild succeeded.\n'
-printf 'APK:    %s\n' "$apk_path"
-printf 'Size:   %s bytes\n' "$apk_size"
-printf 'SHA256: %s\n' "$apk_sha256"
+echo
+echo "TrustAttestor build completed"
+echo "  Variant:       $variant"
+echo "  APK:           $artifact_apk"
+echo "  Signer SHA256: $signer_sha256"
+echo "  APK SHA256:    $apk_sha256"

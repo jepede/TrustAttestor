@@ -78,15 +78,41 @@ android/
 
 ## Compatibility and build
 
-Requirements: JDK 17, Android SDK Platform 35, Build Tools 35.0.0 (the DEX flow also reads the 35.0.1 `d8.jar`), NDK 27.2.12479018, and SDK CMake. The SDK can come from Android Studio or the Android SDK environment; `local.properties` is machine-local and must not be committed.
+The pinned JDK, SDK, Build Tools, NDK, and CMake versions are centralized in `gradle.properties`. The current toolchain is JDK 17, Android SDK Platform 35, Build Tools 35.0.0 (the embedded DEX flow additionally uses the 35.0.1 `d8.jar`), NDK 27.2.12479018, and CMake 3.22.1.
+
+### Autonomous CLI build
+
+Linux/macOS:
+
+```bash
+./build-cli.sh debug
+```
+
+Windows PowerShell:
+
+```powershell
+.\build-cli.ps1 -Variant debug
+```
+
+The CLI validates Git submodules, JDK, and the Android SDK, then installs missing Platform, Build Tools, NDK, and CMake packages through `sdkmanager`. When no signing configuration is supplied for Debug, it creates a development JKS under the external build root and injects that same certificate's SHA-256 into the native signer-identity check. This does not bypass signer verification. The development certificate is not an official release signer and production Cloud L3 must not trust it.
+
+Release still requires an explicit signing configuration outside the repository:
+
+```bash
+./build-cli.sh release --signing-properties /secure/keystore.properties
+```
+
+The CLI also keeps the engineering controls from the original command-line builder: `-v/--variant`, `-b/--build-root`, `-s/--signing-properties`, `--clean`, `--offline`, `--info`, `--init-submodules`, plus arbitrary Gradle arguments after `--`. The same Bash entry point works on Linux, macOS, and Termux; run `./build-cli.sh --help` for the complete interface.
+
+GitHub Actions uses the same `gradle.properties` version source and CLI entry point to prepare a clean Ubuntu runner, build and verify the Debug APK, assert that no build state was written into the checkout, and upload the APK plus SHA-256 metadata.
+
+The SDK can also be configured manually through Android Studio or Android SDK environment variables; `local.properties` remains machine-local and must not be committed.
 
 ```properties
 sdk.dir=/absolute/path/to/Android/Sdk
 ```
 
-Both Debug and Release builds must use the external signing configuration that is used for the
-production package. This keeps the signer fingerprint identical across variants and prevents the
-native signer-identity gate from treating a Debug package as a different application.
+Official builds and production-equivalent Debug builds should continue to use the external production signing configuration. The CLI-generated Debug development certificate exists only for autonomous builds and CI; pass `--signing-properties` when Debug must use the production signer.
 
 ```powershell
 # Gradle state, project caches, Kotlin state, CMake staging, DEX, mappings,

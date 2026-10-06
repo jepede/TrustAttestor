@@ -20,8 +20,18 @@ plugins {
 
 val androidSourceCompatibility: JavaVersion by rootProject.extra
 val androidTargetCompatibility: JavaVersion by rootProject.extra
+
+fun requiredGradleProperty(name: String): String =
+    providers.gradleProperty(name).orNull
+        ?: throw GradleException("Missing required Gradle property: $name")
+
+val pinnedCompileSdk = requiredGradleProperty("trustAttestor.android.compileSdk").toInt()
+val pinnedTargetSdk = requiredGradleProperty("trustAttestor.android.targetSdk").toInt()
+val pinnedMinSdk = requiredGradleProperty("trustAttestor.android.minSdk").toInt()
+val pinnedBuildTools = requiredGradleProperty("trustAttestor.android.buildTools")
+val pinnedCmake = requiredGradleProperty("trustAttestor.android.cmake")
 val ndkVer: String? by project
-val effectiveNdkVersion = ndkVer ?: "27.2.12479018"
+val effectiveNdkVersion = ndkVer ?: requiredGradleProperty("trustAttestor.android.ndk")
 val cloudAttestationUrl = providers.gradleProperty("trustAttestorCloudUrl").orNull.orEmpty()
 val cloudVerdictPublicKey = providers.gradleProperty("trustAttestorCloudVerdictPublicKey").orNull.orEmpty()
 val configuredBuildRoot = providers.gradleProperty("trustAttestorBuildRoot").orNull
@@ -48,10 +58,10 @@ configuredSigningProperties?.let { signingPath ->
     }.forEach { k, v -> project.ext[k.toString()] = v }
 }
 
-// Debug and release must use the same externally supplied production certificate. Keeping the
-// signing inputs explicit here also makes the signer hash embedded in native code identical for
-// both variants; falling back to the Android debug key would make a debug APK fail its own signer
-// identity check.
+// Both variants require an explicitly supplied external signing configuration. Official builds
+// use the production certificate; the autonomous CLI may supply an external development
+// certificate for Debug builds. In either case the certificate SHA-256 embedded in native code is
+// derived from the exact signer used for the APK, so the native signer-identity gate stays active.
 val externalSigningStoreFile = project.findProperty("androidStoreFile")?.toString()
     ?.let { file(it).canonicalFile }
 val externalSigningStorePassword = project.findProperty("androidStorePassword")?.toString()
@@ -116,9 +126,9 @@ val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
 
 android {
     namespace = "com.lingqing.trustattestor"
-    compileSdk = 35
+    compileSdk = pinnedCompileSdk
     ndkVersion = effectiveNdkVersion
-    buildToolsVersion = "35.0.0"
+    buildToolsVersion = pinnedBuildTools
 
     fun getSignerSha256(signConfig: ApkSigningConfig): String {
         val ks = KeyStore.getInstance("JKS")
@@ -156,8 +166,8 @@ android {
 
     defaultConfig {
         applicationId = "com.lingqing.trustattestor"
-        minSdk = 27
-        targetSdk = 35
+        minSdk = pinnedMinSdk
+        targetSdk = pinnedTargetSdk
         versionCode = 15
         versionName = "v1.5"
         buildConfigField(
@@ -247,6 +257,7 @@ android {
 
     externalNativeBuild.cmake {
         path("src/main/cpp/CMakeLists.txt")
+        version = pinnedCmake
         buildStagingDirectory = externalBuildRoot.resolve("native/app")
     }
     packaging {
