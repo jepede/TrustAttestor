@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - cli-build
   pull_request:
   workflow_dispatch:
 
@@ -22,6 +21,7 @@ jobs:
     timeout-minutes: 45
     env:
       TRUST_ATTESTOR_BUILD_ROOT: ${{ github.workspace }}-build
+      GRADLE_USER_HOME: ${{ github.workspace }}-build/gradle-user
 
     steps:
       - name: Checkout repository
@@ -35,6 +35,13 @@ jobs:
         uses: ./.github/actions/setup-android-build
         with:
           cache-read-only: ${{ github.ref_name != github.event.repository.default_branch }}
+
+      - name: Validate CLI scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n android/build-cli.sh
+          pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "android/build-cli.ps1"), [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
       - name: Build and verify Debug APK
         shell: bash

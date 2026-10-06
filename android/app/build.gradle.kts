@@ -58,10 +58,10 @@ configuredSigningProperties?.let { signingPath ->
     }.forEach { k, v -> project.ext[k.toString()] = v }
 }
 
-// Debug and release must use the same externally supplied production certificate. Keeping the
-// signing inputs explicit here also makes the signer hash embedded in native code identical for
-// both variants; falling back to the Android debug key would make a debug APK fail its own signer
-// identity check.
+// Both variants require an explicitly supplied external signing configuration. Official builds
+// use the production certificate; the autonomous CLI may supply an external development
+// certificate for Debug builds. In either case the certificate SHA-256 embedded in native code is
+// derived from the exact signer used for the APK, so the native signer-identity gate stays active.
 val externalSigningStoreFile = project.findProperty("androidStoreFile")?.toString()
     ?.let { file(it).canonicalFile }
 val externalSigningStorePassword = project.findProperty("androidStorePassword")?.toString()
