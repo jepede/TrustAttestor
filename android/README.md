@@ -100,7 +100,29 @@ sdk.dir=/absolute/path/to/Android/Sdk
 
 Debug 和 Release 都必须使用仓库外、与正式包相同的签名配置。这样 Debug 包的签名指纹与 Release 一致，Native 签名身份检查不会因为构建类型不同而失效。
 
-Debug：
+Linux、macOS 和 Termux 推荐使用仓库内的 CLI 构建脚本：
+
+```bash
+cd android
+
+# Release
+./build-cli.sh --variant release \
+  --signing-properties /absolute/path/to/keystore.properties
+
+# Debug
+./build-cli.sh --variant debug \
+  --signing-properties /absolute/path/to/keystore.properties
+```
+
+CLI 默认把 Gradle、Kotlin、CMake、DEX 和 APK 等构建状态写到仓库同级的 `TrustAttestor-build`，不会污染源码树。它会检查 JDK、外部签名配置和 `fmt` 子模块，并在成功后打印 APK 路径、文件大小和 SHA-256。首次克隆时可加 `--init-submodules` 自动初始化子模块；`--clean`、`--stacktrace`、`--offline`、`--info` 可直接控制常见构建行为，额外 Gradle 参数放在 `--` 之后。
+
+完整参数：
+
+```bash
+./build-cli.sh --help
+```
+
+Windows PowerShell Debug：
 
 ```powershell
 # 所有 Gradle 用户状态、项目缓存、Kotlin 状态、CMake staging、DEX、映射和 APK
