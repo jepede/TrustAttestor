@@ -1,4 +1,4 @@
-name: Android CLI Build
+name: TrustAttestor Android Build
 
 on:
   push:
