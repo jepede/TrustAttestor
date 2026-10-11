@@ -92,7 +92,7 @@ android/
 
 ## 兼容性与构建
 
-需要 JDK 17、Android SDK Platform 35、Build Tools 35.0.0（DEX 流程还会读取 35.0.1 的 `d8.jar`）、NDK 27.2.12479018 和 SDK 提供的 CMake。SDK 由 Android SDK 环境变量或 Android Studio 提供；`local.properties` 仅作为本机配置，不应提交。
+需要 JDK 17、Android SDK Platform 35、Build Tools 35.0.0（用于 APK 签名）及 35.0.1（提供独立 D8/R8 JAR）、NDK 27.2.12479018、CMake 3.22.1。所有版本集中记录在 `android/gradle.properties` 的 `trustAttestor.android.*` 属性中；Gradle、CLI 和 CI 读取同一来源。SDK 由 Android SDK 环境变量或 Android Studio 提供；`local.properties` 仅作为本机配置，不应提交。
 
 ```properties
 sdk.dir=/absolute/path/to/Android/Sdk
@@ -105,6 +105,10 @@ Linux、macOS 和 Termux 推荐使用仓库内的 CLI 构建脚本：
 ```bash
 cd android
 
+# 预检：检查 JDK、SDK、NDK、CMake、D8、签名文件和 fmt，**不运行 Gradle**
+./build-cli.sh --doctor \
+  --signing-properties /absolute/path/to/keystore.properties
+
 # Release
 ./build-cli.sh --variant release \
   --signing-properties /absolute/path/to/keystore.properties
@@ -114,7 +118,9 @@ cd android
   --signing-properties /absolute/path/to/keystore.properties
 ```
 
-CLI 默认把 Gradle、Kotlin、CMake、DEX 和 APK 等构建状态写到仓库同级的 `TrustAttestor-build`，不会污染源码树。它会检查 JDK、外部签名配置和 `fmt` 子模块；构建完成后严格解析 AGP 的 `output-metadata.json` 选择最终 APK，再用 `keytool` 取得预期证书 SHA-256，并通过对应 Android Build Tools 的 `apksigner` 验证最终 APK 的真实签名。只有元数据、APK 文件和签名全部通过校验才会报告成功，并输出版本号、Git commit、APK 大小、APK SHA-256、Signer SHA-256 和构建耗时。首次克隆时可加 `--init-submodules` 自动初始化子模块；`--clean`、`--stacktrace`、`--offline`、`--info` 可直接控制常见构建行为，额外 Gradle 参数放在 `--` 之后。
+CLI 默认把 Gradle、Kotlin、CMake、DEX 和 APK 等构建状态写到仓库同级的 `TrustAttestor-build`，不会污染源码树。`--doctor` 会提前检查已安装的 SDK Platform、两个 Build Tools 版本、NDK、CMake、JDK 和签名，不执行 Gradle；缺少某项时会显示对应的版本与路径。它会检查 JDK、外部签名配置和 `fmt` 子模块；构建完成后严格解析 AGP 的 `output-metadata.json` 选择最终 APK，再用 `keytool` 取得预期证书 SHA-256，并通过对应 Android Build Tools 的 `apksigner` 验证最终 APK 的真实签名。只有元数据、APK 文件和签名全部通过校验才会报告成功，并输出版本号、Git commit、APK 大小、APK SHA-256、Signer SHA-256 和构建耗时。首次克隆时可加 `--init-submodules` 自动初始化子模块；`--clean`、`--stacktrace`、`--offline`、`--info` 可直接控制常见构建行为，额外 Gradle 参数放在 `--` 之后。
+
+仓库使用 [Android CLI CI](../.github/workflows/android-cli.yml) 在 Pull Request 上执行离线 CLI 回归测试和真实 Debug 构建。CI 为该次构建生成临时测试 JKS、验证最终 APK 签名后清理，**不会上传或发布临时签名的 APK**；它不替代使用正式证书进行的发布验证。
 
 完整参数：
 
