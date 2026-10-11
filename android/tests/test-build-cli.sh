@@ -78,7 +78,9 @@ JSON
 fi
 EOF
 chmod +x "$fakebin/java" "$fakebin/keytool" "$sdk/build-tools/35.0.0/apksigner" \
-    "$sdk/cmake/3.22.1/bin/cmake" "$fixture/android/gradlew"
+    "$sdk/cmake/3.22.1/bin/cmake"
+# Verify the CLI invokes Gradle through Bash even when a checkout lacks +x.
+chmod 0644 "$fixture/android/gradlew"
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
