@@ -129,9 +129,11 @@ grep -Fq 'Variant:       release' "$TEMP_ROOT/release" ||
     fail "release selection failed"
 
 expect_failure 'unsupported variant' run_cli --variant bad
-expect_failure 'JDK 17 or newer' env MOCK_JAVA_VERSION=8 bash \
-    "$fixture/android/build-cli.sh" --signing-properties "$private/keystore.properties" \
-    --build-root "$output"
+run_cli_old_java() { MOCK_JAVA_VERSION=8 run_cli --doctor; }
+run_cli_wrong_signer() { MOCK_SIGNER_MISMATCH=1 run_cli --variant debug; }
+run_cli_bad_metadata() { MOCK_BAD_METADATA=1 run_cli --variant debug; }
+
+expect_failure 'JDK 17 or newer' run_cli_old_java
 
 cp "$private/keystore.properties" "$fixture/android/leaked.properties"
 expect_failure 'signing properties must be outside the repository' \
@@ -141,14 +143,7 @@ rm "$sdk/build-tools/35.0.1/lib/d8.jar"
 expect_failure 'D8/R8 Build Tools' run_cli --doctor
 printf 'fake d8.jar\n' > "$sdk/build-tools/35.0.1/lib/d8.jar"
 
-expect_failure 'APK signer mismatch' \
-    env MOCK_SIGNER_MISMATCH=1 ANDROID_SDK_ROOT="$sdk" PATH="$fakebin:$PATH" \
-    bash "$fixture/android/build-cli.sh" \
-    --signing-properties "$private/keystore.properties" --build-root "$output"
-
-expect_failure 'contains no APK elements' \
-    env MOCK_BAD_METADATA=1 ANDROID_SDK_ROOT="$sdk" PATH="$fakebin:$PATH" \
-    bash "$fixture/android/build-cli.sh" \
-    --signing-properties "$private/keystore.properties" --build-root "$output"
+expect_failure 'APK signer mismatch' run_cli_wrong_signer
+expect_failure 'contains no APK elements' run_cli_bad_metadata
 
 echo 'PASS: help, doctor, debug/release, clean args, JDK, signing, SDK, and metadata checks'
