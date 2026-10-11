@@ -38,8 +38,6 @@ jobs:
     needs: shell-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      TRUST_ATTESTOR_BUILD_ROOT: ${{ runner.temp }}/trustattestor-build
     steps:
       - name: Checkout with fmt submodule
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,6 +45,10 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
+
+      - name: Set repository-external build root
+        shell: bash
+        run: echo "TRUST_ATTESTOR_BUILD_ROOT=$RUNNER_TEMP/trustattestor-build" >> "$GITHUB_ENV"
 
       - name: Install Android toolchain
         uses: ./.github/actions/setup-android-build
