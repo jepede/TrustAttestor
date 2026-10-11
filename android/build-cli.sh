@@ -13,6 +13,7 @@ stacktrace=0
 offline=0
 info=0
 init_submodules=0
+doctor=0
 gradle_extra=()
 
 usage() {
@@ -31,6 +32,7 @@ Options:
       --offline                       Run Gradle in offline mode
       --info                          Enable Gradle --info logging
       --init-submodules               Run git submodule update --init --recursive
+      --doctor                        Check toolchain/signing without running Gradle
   -h, --help                          Show this help
 
 Environment:
@@ -42,6 +44,7 @@ Environment:
 Examples:
   ./build-cli.sh -v release -s /private/TrustAttestor/keystore.properties
   ./build-cli.sh -v debug -s /private/TrustAttestor/keystore.properties --stacktrace
+  ./build-cli.sh --doctor -s /private/TrustAttestor/keystore.properties
   ./build-cli.sh -s /private/TrustAttestor/keystore.properties -- -PndkVer=27.2.12479018
 USAGE
 }
@@ -81,9 +84,30 @@ path_is_within_repo() {
 read_property() {
     local key="$1"
     local file="$2"
-    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" \
-        | tail -n 1 \
-        | tr -d '\r'
+    # Compare literal property keys (dots must not become regex wildcards).
+    awk -v target="$key" '
+      /^[[:space:]]*[#!]/ { next }
+      {
+        separator = index($0, "=")
+        if (!separator) next
+        name = substr($0, 1, separator - 1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+        if (name == target) {
+            value = substr($0, separator + 1)
+            sub(/\r$/, "", value)
+            sub(/^[[:space:]]+/, "", value)
+            found = 1
+        }
+      }
+      END { if (found) print value }
+    ' "$file"
+}
+
+required_toolchain_property() {
+    local key="$1" value
+    value="$(read_property "$key" "$SCRIPT_DIR/gradle.properties")"
+    [ -n "$value" ] || die "missing required Android toolchain property: $key"
+    printf '%s\n' "$value"
 }
 
 resolve_sdk_root() {
@@ -103,8 +127,18 @@ resolve_sdk_root() {
     (cd -- "$candidate" >/dev/null 2>&1 && pwd -P)
 }
 
+resolve_java() {
+    if [ -n "${JAVA_HOME:-}" ]; then
+        [ -x "$JAVA_HOME/bin/java" ] || return 1
+        printf '%s\n' "$JAVA_HOME/bin/java"
+    else
+        command -v java
+    fi
+}
+
 resolve_keytool() {
-    if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/keytool" ]; then
+    if [ -n "${JAVA_HOME:-}" ]; then
+        [ -x "$JAVA_HOME/bin/keytool" ] || return 1
         printf '%s\n' "$JAVA_HOME/bin/keytool"
     else
         command -v keytool
@@ -112,19 +146,10 @@ resolve_keytool() {
 }
 
 resolve_apksigner() {
-    local sdk_root="$1"
-    local build_tools="$2"
-    local candidate=""
-
-    if [ -n "$sdk_root" ] && [ -n "$build_tools" ]; then
-        candidate="$sdk_root/build-tools/$build_tools/apksigner"
-        if [ -x "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    fi
-
-    command -v apksigner 2>/dev/null || return 1
+    local sdk_root="$1" build_tools="$2"
+    local candidate="$sdk_root/build-tools/$build_tools/apksigner"
+    [ -x "$candidate" ] || return 1
+    printf '%s\n' "$candidate"
 }
 
 while (($#)); do
@@ -164,6 +189,10 @@ while (($#)); do
             init_submodules=1
             shift
             ;;
+        --doctor)
+            doctor=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -187,13 +216,14 @@ case "$variant" in
 esac
 
 command -v git >/dev/null 2>&1 || die "git is required"
-command -v java >/dev/null 2>&1 || die "JDK 17 is required; java was not found in PATH"
 command -v python3 >/dev/null 2>&1 || die "python3 is required for APK metadata validation"
 
-keytool_path="$(resolve_keytool)" || die "keytool was not found; install/use a complete JDK 17"
-java_version_output="$(java -version 2>&1 | head -n 1)"
-java_major="$(printf '%s\n' "$java_version_output" | sed -nE 's/.*version "([0-9]+)(\.[0-9]+)?.*/\1/p')"
-if [ -n "$java_major" ] && [ "$java_major" -lt 17 ]; then
+java_path="$(resolve_java)" || die "java was not found (check JAVA_HOME or PATH)"
+keytool_path="$(resolve_keytool)" || die "keytool was not found in the selected JDK"
+java_version_output="$("$java_path" -version 2>&1 | head -n 1)"
+java_major="$(printf '%s\n' "$java_version_output" | sed -nE 's/.*version "?(1\.)?([0-9]+).*/\2/p')"
+[[ "$java_major" =~ ^[0-9]+$ ]] || die "cannot determine JDK version: $java_version_output"
+if [ "$java_major" -lt 17 ]; then
     die "JDK 17 or newer is required; detected: $java_version_output"
 fi
 
@@ -255,18 +285,35 @@ if [ ! -f "$fmt_dir/CMakeLists.txt" ]; then
     fi
 fi
 
-build_tools_version="$(
-    sed -nE 's/^[[:space:]]*buildToolsVersion[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
-        "$SCRIPT_DIR/app/build.gradle.kts" \
-    | head -n 1
-)"
-[ -n "$build_tools_version" ] || die \
-    "could not resolve buildToolsVersion from android/app/build.gradle.kts"
+compile_sdk="$(required_toolchain_property "trustAttestor.android.compileSdk")"
+build_tools_version="$(required_toolchain_property "trustAttestor.android.buildTools")"
+dex_build_tools_version="$(required_toolchain_property "trustAttestor.android.dexBuildTools")"
+ndk_version="$(required_toolchain_property "trustAttestor.android.ndk")"
+cmake_version="$(required_toolchain_property "trustAttestor.android.cmake")"
 
-sdk_root="$(resolve_sdk_root 2>/dev/null || true)"
-apksigner_path="$(resolve_apksigner "$sdk_root" "$build_tools_version" 2>/dev/null || true)"
-[ -n "$apksigner_path" ] || die \
-    "apksigner was not found (expected Build Tools $build_tools_version under ANDROID_SDK_ROOT/ANDROID_HOME or in PATH)"
+# Preserve the supported -PndkVer override in app/build.gradle.kts.
+for arg in "${gradle_extra[@]}"; do
+    case "$arg" in
+        -PndkVer=*) ndk_version="${arg#-PndkVer=}" ;;
+    esac
+done
+[[ "$compile_sdk" =~ ^[0-9]+$ ]] || die "invalid compileSdk: $compile_sdk"
+for version in "$build_tools_version" "$dex_build_tools_version" "$ndk_version" "$cmake_version"; do
+    [[ "$version" =~ ^[0-9]+(\.[0-9]+)+$ ]] || die "invalid Android toolchain version: $version"
+done
+
+sdk_root="$(resolve_sdk_root)" || die \
+    "Android SDK not found; set ANDROID_SDK_ROOT/ANDROID_HOME or android/local.properties"
+[ -s "$sdk_root/platforms/android-$compile_sdk/android.jar" ] || die \
+    "Android platform android-$compile_sdk is missing ($sdk_root/platforms/android-$compile_sdk)"
+[ -s "$sdk_root/build-tools/$dex_build_tools_version/lib/d8.jar" ] || die \
+    "D8/R8 Build Tools $dex_build_tools_version is missing ($sdk_root/build-tools/$dex_build_tools_version/lib/d8.jar)"
+[ -f "$sdk_root/ndk/$ndk_version/source.properties" ] || die \
+    "Android NDK $ndk_version is missing ($sdk_root/ndk/$ndk_version)"
+[ -x "$sdk_root/cmake/$cmake_version/bin/cmake" ] || die \
+    "Android CMake $cmake_version is missing ($sdk_root/cmake/$cmake_version/bin/cmake)"
+apksigner_path="$(resolve_apksigner "$sdk_root" "$build_tools_version")" || die \
+    "apksigner from Android Build Tools $build_tools_version is missing or not executable"
 
 export TRUST_ATTESTOR_BUILD_ROOT="$build_root"
 export TRUST_ATTESTOR_SIGNING_PROPERTIES="$signing_properties"
@@ -298,16 +345,22 @@ note "Build root: $build_root"
 note "Signing properties: $signing_properties"
 note "Expected signer SHA-256: $expected_signer_sha256"
 note "Java: $java_version_output"
-note "Build Tools: $build_tools_version"
-if [ -n "$sdk_root" ]; then
-    note "Android SDK: $sdk_root"
+note "Compile SDK: $compile_sdk"
+note "Build Tools: $build_tools_version (APK signing), $dex_build_tools_version (D8/R8)"
+note "NDK: $ndk_version"
+note "CMake: $cmake_version"
+note "Android SDK: $sdk_root"
+
+if ((doctor)); then
+    note "Preflight passed; Gradle was not started."
+    exit 0
 fi
 
 cd -- "$SCRIPT_DIR"
 
 if ((clean_first)); then
     note "Cleaning external Gradle outputs..."
-    ./gradlew "${gradle_args[@]}" clean "${gradle_extra[@]}"
+    ./gradlew "${gradle_args[@]}" clean
 fi
 
 build_started_at="$(date +%s)"
