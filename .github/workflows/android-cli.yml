@@ -1,0 +1,95 @@
+name: Android CLI CI
+
+on:
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/actions/setup-android-build/**"
+      - ".github/workflows/android-cli.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  shell-tests:
+    name: CLI regression tests (offline)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run CLI regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n android/build-cli.sh
+          bash -n android/tests/test-build-cli.sh
+          bash android/tests/test-build-cli.sh
+
+  android-build:
+    name: Build and verify disposable-signed Debug APK
+    needs: shell-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout with fmt submodule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set repository-external build root
+        shell: bash
+        run: echo "TRUST_ATTESTOR_BUILD_ROOT=$RUNNER_TEMP/trustattestor-build" >> "$GITHUB_ENV"
+
+      - name: Install Android toolchain
+        uses: ./.github/actions/setup-android-build
+
+      # Debug uses the same signing path as release. Generate a disposable JKS
+      # to exercise real Gradle/Native/APK signing without production secrets.
+      # Never distribute an APK signed with this CI-only key.
+      - name: Create disposable CI keystore outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_dir="$RUNNER_TEMP/trustattestor-signing"
+          mkdir -p "$signing_dir"
+          chmod 700 "$signing_dir"
+          keytool -genkeypair -noprompt -alias ci \
+            -keyalg RSA -keysize 2048 -validity 1 -storetype JKS \
+            -dname "CN=TrustAttestor CI, O=Temporary Test, C=US" \
+            -keystore "$signing_dir/ci.jks" \
+            -storepass "ci-only-change-me" -keypass "ci-only-change-me"
+          {
+            printf 'androidStoreFile=%s\n' "$signing_dir/ci.jks"
+            printf 'androidStorePassword=ci-only-change-me\n'
+            printf 'androidKeyAlias=ci\n'
+            printf 'androidKeyPassword=ci-only-change-me\n'
+          } > "$signing_dir/keystore.properties"
+          chmod 600 "$signing_dir/"*
+          echo "TRUST_ATTESTOR_SIGNING_PROPERTIES=$signing_dir/keystore.properties" >> "$GITHUB_ENV"
+
+      - name: Run CLI toolchain and signing doctor
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash android/build-cli.sh --doctor
+
+      - name: Build Debug and verify APK certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash android/build-cli.sh --variant debug --stacktrace
+
+      - name: Remove disposable CI keystore
+        if: always()
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/trustattestor-signing"

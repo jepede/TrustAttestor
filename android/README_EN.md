@@ -78,7 +78,7 @@ android/
 
 ## Compatibility and build
 
-Requirements: JDK 17, Android SDK Platform 35, Build Tools 35.0.0 (the DEX flow also reads the 35.0.1 `d8.jar`), NDK 27.2.12479018, and SDK CMake. The SDK can come from Android Studio or the Android SDK environment; `local.properties` is machine-local and must not be committed.
+Requirements: JDK 17, Android SDK Platform 35, Build Tools 35.0.0 (APK signing) and 35.0.1 (separate D8/R8 JAR), NDK 27.2.12479018, and CMake 3.22.1. Versions are pinned in `android/gradle.properties` under `trustAttestor.android.*` and shared by Gradle, the CLI, and CI. The SDK can come from Android Studio or the Android SDK environment; `local.properties` is machine-local and must not be committed.
 
 ```properties
 sdk.dir=/absolute/path/to/Android/Sdk
@@ -87,6 +87,19 @@ sdk.dir=/absolute/path/to/Android/Sdk
 Both Debug and Release builds must use the external signing configuration that is used for the
 production package. This keeps the signer fingerprint identical across variants and prevents the
 native signer-identity gate from treating a Debug package as a different application.
+
+On Linux, macOS, and Termux, use the CLI to preflight the toolchain and then build:
+
+```bash
+cd android
+./build-cli.sh --doctor --signing-properties /absolute/path/to/keystore.properties
+./build-cli.sh --variant debug --signing-properties /absolute/path/to/keystore.properties
+./build-cli.sh --variant release --signing-properties /absolute/path/to/keystore.properties
+```
+
+`--doctor` verifies Java, the SDK platform, both pinned Build Tools versions, NDK, CMake, fmt submodule, and signing material without running Gradle. Builds keep Gradle/Kotlin/CMake/DEX/APK outputs outside the checkout and validate the APK's signer SHA-256 against the signing keystore. Use `--init-submodules` on a fresh clone if needed.
+
+The [Android CLI CI workflow](../.github/workflows/android-cli.yml) runs offline CLI regression tests and a real Debug build on pull requests. It creates a disposable test JKS outside the checkout, verifies the resulting APK signature, and does not upload or publish the test-signed APK. Release verification still requires the production signing material.
 
 ```powershell
 # Gradle state, project caches, Kotlin state, CMake staging, DEX, mappings,

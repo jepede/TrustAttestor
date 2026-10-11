@@ -1353,9 +1353,10 @@ void FindAPatch() {
     if (uname(&uts) == 0 && uts.release[0] - '0' <= 4) {
         auto no_ap_pagefault = CheckTruncateMincore(kNoApAuthBranch);
         auto ap_pagefault = CheckTruncateMincore(kDoApAuthBranch);
+        // fmt 11 requires enum arguments to be formatted explicitly as integers.
         LOGI("no_ap_pagefault={} ap_pagefault={}",
-             no_ap_pagefault,
-             ap_pagefault);
+             static_cast<int>(no_ap_pagefault),
+             static_cast<int>(ap_pagefault));
         if (no_ap_pagefault == ERROR || ap_pagefault == ERROR) {
             MarkProbeUnavailable(0, "device.apatch.page_fault");
         }

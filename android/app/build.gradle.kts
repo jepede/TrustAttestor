@@ -21,7 +21,7 @@ plugins {
 val androidSourceCompatibility: JavaVersion by rootProject.extra
 val androidTargetCompatibility: JavaVersion by rootProject.extra
 val ndkVer: String? by project
-val effectiveNdkVersion = ndkVer ?: "27.2.12479018"
+val effectiveNdkVersion = ndkVer ?: providers.gradleProperty("trustAttestor.android.ndk").get()
 val cloudAttestationUrl = providers.gradleProperty("trustAttestorCloudUrl").orNull.orEmpty()
 val cloudVerdictPublicKey = providers.gradleProperty("trustAttestorCloudVerdictPublicKey").orNull.orEmpty()
 val configuredBuildRoot = providers.gradleProperty("trustAttestorBuildRoot").orNull
@@ -116,9 +116,9 @@ val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
 
 android {
     namespace = "com.lingqing.trustattestor"
-    compileSdk = 35
+    compileSdk = providers.gradleProperty("trustAttestor.android.compileSdk").get().toInt()
     ndkVersion = effectiveNdkVersion
-    buildToolsVersion = "35.0.0"
+    buildToolsVersion = providers.gradleProperty("trustAttestor.android.buildTools").get()
 
     fun getSignerSha256(signConfig: ApkSigningConfig): String {
         val ks = KeyStore.getInstance("JKS")
@@ -246,6 +246,7 @@ android {
     }
 
     externalNativeBuild.cmake {
+        version = providers.gradleProperty("trustAttestor.android.cmake").get()
         path("src/main/cpp/CMakeLists.txt")
         buildStagingDirectory = externalBuildRoot.resolve("native/app")
     }
