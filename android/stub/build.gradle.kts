@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "io.github.a13e300.stub"
-    compileSdk = 35
+    compileSdk = providers.gradleProperty("trustAttestor.android.compileSdk").get().toInt()
 
     defaultConfig {
         minSdk = 27
