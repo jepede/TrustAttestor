@@ -360,12 +360,12 @@ cd -- "$SCRIPT_DIR"
 
 if ((clean_first)); then
     note "Cleaning external Gradle outputs..."
-    ./gradlew "${gradle_args[@]}" clean
+    bash ./gradlew "${gradle_args[@]}" clean
 fi
 
 build_started_at="$(date +%s)"
 note "Running $assemble_task ..."
-./gradlew "${gradle_args[@]}" "$assemble_task" "${gradle_extra[@]}"
+bash ./gradlew "${gradle_args[@]}" "$assemble_task" "${gradle_extra[@]}"
 build_finished_at="$(date +%s)"
 build_duration="$((build_finished_at - build_started_at))"
 
