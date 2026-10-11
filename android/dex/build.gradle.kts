@@ -123,7 +123,7 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 
 android {
     namespace = "com.lingqing.trustattestor"
-    compileSdk = 35
+    compileSdk = providers.gradleProperty("trustAttestor.android.compileSdk").get().toInt()
     sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/source/revocationList/java"))
 
     defaultConfig {
@@ -169,8 +169,8 @@ dependencies {
 
 // Build the embedded payload with the standard Android R8 toolchain.
 val androidSdkDirectory = androidComponents.sdkComponents.sdkDirectory
-val androidPlatformJar = androidSdkDirectory.map { it.file("platforms/android-35/android.jar") }
-val d8Jar = androidSdkDirectory.map { it.file("build-tools/35.0.1/lib/d8.jar") }
+val androidPlatformJar = androidSdkDirectory.map { it.file("platforms/android-${providers.gradleProperty("trustAttestor.android.compileSdk").get()}/android.jar") }
+val d8Jar = androidSdkDirectory.map { it.file("build-tools/${providers.gradleProperty("trustAttestor.android.dexBuildTools").get()}/lib/d8.jar") }
 
 fun File.isClassPathEntry(): Boolean = isDirectory || extension.equals("jar", ignoreCase = true)
 
